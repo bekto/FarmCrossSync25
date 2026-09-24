@@ -1,4 +1,13 @@
 Farm CrossSync 25
+
+> **Status of this document.** This is the original product brief. The
+> product intent is unchanged, but the UI mockups and the save-selection
+> wording below predate the FS25 folder + save-slot model, and the repository
+> layout section predates the move to a single monorepo. For what actually
+> ships, use `specs/farm-crosssync-25/` (source of truth for systems and UI)
+> and the root `README.md` (layout and setup). Sections that were superseded
+> say so inline.
+
 1. Product Overview
 Farm CrossSync 25 is a cross-platform desktop application for Farming Simulator 25 that allows friends playing the same multiplayer farm to safely share their latest savegames through the cloud.
 The core problem:
