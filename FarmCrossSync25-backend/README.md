@@ -37,8 +37,10 @@ under `.wrangler/state/`, which is gitignored. Check it with:
 curl http://localhost:8787/health   # {"status":"ok"}
 ```
 
-No `.dev.vars` is required. Secrets would go in `.dev.vars` (gitignored); none
-are needed for local development yet.
+Local development does not require `.dev.vars`; the dev-only R2 route markers
+can also be passed on the `wrangler dev` command line (see "Development-only R2
+test route"). `.dev.vars` (gitignored) is a convenience for humans and is also
+where real R2 S3 credentials would go.
 
 ## Identity & sessions
 
@@ -76,18 +78,12 @@ Migration `0003_farms.sql` creates `farms`, `farm_members`, and `farm_invites`
 Every farms endpoint from the spec is registered behind bearer-token auth:
 
 - `POST /farms` — create (creator becomes owner)
-- `GET /farms/:farmId` — farm detail (stub)
+- `GET /farms/:farmId` — farm detail
 - `POST /farms/:farmId/join` — request to join by code
 - `GET /farms/:farmId/invites`, `POST /invites/:inviteId/accept`, `POST /invites/:inviteId/deny` — owner only
 - `GET /farms/:farmId/members` — member list (members only; `user_id`, `display_name`, `role`, `joined_at`)
 - `DELETE /farms/:farmId/members/:userId` — owner kick, or self-leave
 - `POST /farms/:farmId/transfer-owner` — owner hands ownership to a member (body `{ "userId": "..." }`; previous owner stays a member)
-
-The still-unimplemented stub (`GET /farms/:farmId`) returns HTTP `501` with a structured body:
-
-```json
-{ "error": "not_implemented", "endpoint": "GET /farms/:farmId" }
-```
 
 **Kick = leave.** `DELETE /farms/:farmId/members/:userId` ends the membership,
 deletes the target's `player_saves` row, and deletes their R2 object via the
@@ -96,8 +92,8 @@ row (leave); deleting someone else requires the farm owner. **Local saves are
 never touched** — the Worker has no filesystem access; local files are a client
 concern. When the owner leaves while members remain, the earliest-joined
 survivor is promoted to `owner` (the owner may also transfer explicitly).
-The last member leaving leaves the farm row in place; the farm cascade is
-out of scope here.
+The last member leaving deletes the farm and cascades to its memberships,
+invites, and cloud saves (the save objects are removed from R2).
 
 **Member cap:** a farm holds a maximum of 16 members. The shared constant is
 `MAX_FARM_MEMBERS` in `src/farms.ts`. Enforcement is two-layered: the join

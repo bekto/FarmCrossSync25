@@ -45,7 +45,10 @@ npm install
 npm run check                       # svelte-check (typecheck)
 node --test src/lib/*.test.ts       # TypeScript unit tests
 npm run build                       # production web build
-cargo test --manifest-path src-tauri/Cargo.toml   # Rust unit tests
+
+# Desktop native side
+cargo test  --manifest-path src-tauri/Cargo.toml    # Rust unit tests
+cargo clippy --manifest-path src-tauri/Cargo.toml --all-targets -- -D warnings
 
 # Backend
 cd ../FarmCrossSync25-backend
@@ -53,6 +56,26 @@ npm install
 npm run typecheck
 npm test
 ```
+
+End-to-end suites (each starts its own local Worker; see the backend README
+for the dev-only R2 route markers these rely on):
+
+```bash
+cd FarmCrossSync25-app
+npm run upload:e2e
+npm run download:e2e
+npm run reliability:e2e
+npm run lifecycle:e2e
+```
+
+Continuous integration runs the typecheck, lint, test and build checks above
+for both projects on every push and pull request
+(`.github/workflows/ci.yml`).
+
+Deploying the backend runs a guard first
+(`FarmCrossSync25-backend/scripts/deploy-guard.mjs`) that refuses to deploy a
+configuration carrying development-only vars, a placeholder D1 database id, a
+placeholder endpoint URL, or missing production secrets.
 
 Each project's own `README.md` documents local startup, environment
 variables, builds, and installers.

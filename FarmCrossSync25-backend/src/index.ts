@@ -231,9 +231,6 @@ app.post("/logout", async (c) => {
 });
 
 // Farms & membership route surface. All routes require an authenticated user.
-// Business logic (create/join/accept/deny/kick/transfer) lands in later tickets;
-// for now every handler returns a structured `not_implemented` response so the
-// route surface and auth wiring can be exercised end to end.
 app.use("/farms", requireAuth);
 app.use("/farms/*", requireAuth);
 app.use("/invites/*", requireAuth);
