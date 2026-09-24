@@ -1,5 +1,11 @@
 # Reliability failure-mode pass (ticket 47)
 
+> **Historical record.** This is a point-in-time pass recorded during Stage 7
+> and its counts are frozen at that date. The failure-mode findings remain
+> valid, but later work (the slot rework and tickets 71–90) changed the code
+> and grew the suites. For current results run the commands in the root
+> `README.md`; do not quote the counts below as current.
+
 Recorded execution of the Stage 7 failure checklist (`docs/PRODUCT.md`, "Stage 7 —
 Reliability Testing"), confirming every failure case leaves the local save
 recoverable.

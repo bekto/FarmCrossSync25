@@ -15,13 +15,13 @@ not visually: this environment is headless (no GUI).
 | "Download & Replace" / "Cancel" | `+page.svelte` confirm label; `ConfirmDialog.svelte` | download confirmation dialog |
 | "Keep My Save" / "Download Cloud Save" / "Cancel" | `ConflictDialog.svelte` buttons | conflict dialog |
 | Failed cloud operations state local data is safe | `errors.ts` `ERROR_MESSAGES`; `upload.ts` `LOCAL_SAVE_SAFE_MESSAGE`; `download.ts` `ORIGINAL_SAVE_RECOVERABLE_MESSAGE` | toasts / inline alerts |
-| Settings: player name, FS25 save, backup location, farm ID, farm code, Change Save, Leave Farm | `SettingsScreen.svelte` headings and buttons | Settings screen |
+| Settings: player name, FS25 folder, per-farm slot, backup location, farm ID, farm code, Sign out, Leave Farm | `SettingsScreen.svelte` headings and buttons | Settings screen |
 | "Make owner" and kick | `MemberRow.svelte`; `ownerActions.ts` `transferConfirmation` / `kickConfirmation` | player rows + confirmation |
 | "Upload My Save" and "Download" on rows | `FarmScreen.svelte`; `MemberRow.svelte` | farm screen |
 | Join Requests panel Accept / Deny | `JoinRequestsPanel.svelte` | owner view |
 | Farm name + code with copy, latest upload, player list | `FarmScreen.svelte` | farm screen |
-| FS25 Save Location, Scan Automatically / Select Folder | `SaveLocation.svelte` | onboarding |
-| Size warning above ~200 MB | `upload.ts` `SIZE_WARNING_MESSAGE` | `UploadProgress.svelte` |
+| FS25 folder selection (auto-detect + Select Folder) with a slot preview | `fs25Root.ts`, `SlotPicker.svelte` | FS25 folder onboarding |
+| Size warning above ~200 MB | `upload.ts` `SIZE_WARNING_MESSAGE` | `ConfirmDialog` (confirmed or dismissed before upload proceeds) |
 | Kick / leave delete the cloud save, local save untouched | `ownerActions.ts` `kickConfirmation`; `settings.ts` `leaveConfirmation` | confirmation dialog; leave blurb |
 | Error states: no internet, upload failed, download failed, farm not found, already member, pending request, savegame not found, invalid save, hash mismatch | `errors.ts` `ERROR_MESSAGES` (one entry per `ErrorKey`) | toasts |
 
