@@ -39,6 +39,8 @@ export interface SettingsView {
 export interface SettingsDeps {
   getIdentity(): Promise<Identity>;
   setDisplayName(name: string): Promise<Identity>;
+  /** Persist the name in the cloud via `PATCH /me` (ticket 84). */
+  updateCloudDisplayName(name: string): Promise<void>;
   getSyncState(farmId: string): Promise<SyncState | null>;
   getFs25Root(): Promise<string | null>;
   setFs25Root(path: string): Promise<unknown>;
@@ -49,6 +51,11 @@ export interface SettingsDeps {
   setBackupLocation(path: string): Promise<unknown>;
   fetchFarm(farmId: string): Promise<FarmDetail>;
   leaveFarm(farmId: string): Promise<void>;
+  /**
+   * Sign out (ticket 83): revoke the session, clear the stored token and the
+   * session cache, and return to the registration prompt. Safe when offline.
+   */
+  signOut(): Promise<void>;
   /** Production wires the confirmation dialog; injected so tests fake it. */
   confirm: ConfirmFn;
 }
@@ -59,7 +66,12 @@ export interface SettingsScreen {
   snapshot(): SettingsView;
   /** Load identity, FS25 folder, farm slot, backup location, and farm detail. */
   load(farmId: string): Promise<void>;
-  /** Edit the display name; false when blank or the command failed. */
+  /**
+   * Edit the display name: writes the local setting and syncs the cloud name
+   * (`PATCH /me`) as separate steps. False when blank, over-long, or either
+   * step failed; on a cloud-only failure the local name has still changed and
+   * the error says so (local and cloud diverge, ticket 84).
+   */
   saveDisplayName(name: string): Promise<boolean>;
   /** Pick + persist a new FS25 folder; returns the new root, or null. */
   changeFs25Root(): Promise<string | null>;
@@ -69,11 +81,35 @@ export interface SettingsScreen {
   changeBackupLocation(): Promise<boolean>;
   /** Confirm, then leave. Local saves are untouched. */
   leave(farmId: string): Promise<boolean>;
+  /** Confirm, then sign out of the cloud on this device (ticket 83). */
+  signOut(): Promise<boolean>;
 }
 
 export function leaveConfirmation(farmName: string): string {
   return `Leave ${farmName}? Your cloud save in this farm will be deleted. Your local save is untouched.`;
 }
+
+export function signOutConfirmation(): string {
+  return "Sign out? This device will need to register again to use the cloud. Your local saves are untouched.";
+}
+
+/**
+ * The backend's display-name cap (`PATCH /me`): names are trimmed, must be
+ * 1..=64 characters, and are never silently truncated.
+ */
+export const MAX_DISPLAY_NAME_LENGTH = 64;
+
+/**
+ * Copy for the local/cloud split after a failed `PATCH /me` (ticket 84): the
+ * local write succeeded, so the device and the cloud now hold different names.
+ */
+export function cloudUpdateFailedMessage(reason: string): string {
+  return `Display name updated on this device only; the cloud name did not change (${reason}). Farm members still see the old name.`;
+}
+
+/** Success copy: only reached when both the local write and `PATCH /me` landed. */
+export const DISPLAY_NAME_SYNCED_MESSAGE =
+  "Display name updated and synced to the cloud.";
 
 const describe = describeError;
 
@@ -148,15 +184,36 @@ export function createSettings(deps: SettingsDeps): SettingsScreen {
         emit();
         return false;
       }
+      if (trimmed.length > MAX_DISPLAY_NAME_LENGTH) {
+        // The backend rejects rather than truncates; mirror it up front so the
+        // local and cloud rules stay identical.
+        state.error = `Display name must be at most ${MAX_DISPLAY_NAME_LENGTH} characters.`;
+        emit();
+        return false;
+      }
       state.error = null;
+      // Local write first: the device name is the user's immediate setting and
+      // must land even when the cloud is unreachable (ticket 84).
+      let identity: Identity;
       try {
-        const identity = await deps.setDisplayName(trimmed);
-        state.displayName = identity.displayName ?? trimmed;
-        state.message = "Display name updated.";
+        identity = await deps.setDisplayName(trimmed);
+      } catch (cause) {
+        fail(cause);
+        return false;
+      }
+      state.displayName = identity.displayName ?? trimmed;
+      emit();
+      try {
+        await deps.updateCloudDisplayName(trimmed);
+        state.message = DISPLAY_NAME_SYNCED_MESSAGE;
         emit();
         return true;
       } catch (cause) {
-        fail(cause);
+        // Local-only success: say plainly that the two now diverge instead of
+        // an ambiguous "updated" (the cloud name is what farm members see).
+        state.message = null;
+        state.error = cloudUpdateFailedMessage(describe(cause));
+        emit();
         return false;
       }
     },
@@ -220,6 +277,20 @@ export function createSettings(deps: SettingsDeps): SettingsScreen {
       try {
         await deps.leaveFarm(farmId);
         state.message = `Left ${name}. Your local save is untouched.`;
+        emit();
+        return true;
+      } catch (cause) {
+        fail(cause);
+        return false;
+      }
+    },
+    async signOut() {
+      const proceed = await deps.confirm(signOutConfirmation(), "Sign out");
+      if (!proceed) return false;
+      state.error = null;
+      try {
+        await deps.signOut();
+        state.message = "Signed out.";
         emit();
         return true;
       } catch (cause) {

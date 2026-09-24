@@ -76,7 +76,7 @@ No failure case destroyed or modified local data.
   scripts calling the same service functions the components call.
 - **Interruptions are simulated, not a real byte-level kill.** Interrupted
   upload uses an injected `putToR2` that throws; interrupted download uses an
-  injected failing `fetchArchive`/`unpackSave`/`replaceSave` and a Rust
+  injected failing `fetchArchive`/`unpackSave`/`installSaveToSlot` and a Rust
   failpoint mid-swap. The exercised code path is identical to a real network
   drop; what is *not* covered is a process kill during the brief two-step rename
   in `replace.rs` (the original is renamed to an aside sibling and never

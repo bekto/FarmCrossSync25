@@ -1,8 +1,12 @@
 import { test } from "node:test";
 import assert from "node:assert/strict";
 import {
+  cloudUpdateFailedMessage,
   createSettings,
+  DISPLAY_NAME_SYNCED_MESSAGE,
   leaveConfirmation,
+  MAX_DISPLAY_NAME_LENGTH,
+  signOutConfirmation,
   type SettingsDeps,
 } from "./settings.ts";
 import type { Identity } from "./identity.ts";
@@ -25,6 +29,7 @@ interface Recorded {
   slot: number | null;
   pickResult: string | null;
   listSlotsError: string | null;
+  cloudNameError: string | null;
 }
 
 function record(): Recorded {
@@ -38,6 +43,7 @@ function record(): Recorded {
     slot: null,
     pickResult: null,
     listSlotsError: null,
+    cloudNameError: null,
   };
 }
 
@@ -57,6 +63,10 @@ function makeDeps(record: Recorded, overrides: Partial<SettingsDeps> = {}): Sett
       record.calls.push(`setDisplayName:${name}`);
       record.displayName = name;
       return { ...identity, displayName: name };
+    },
+    updateCloudDisplayName: async (name) => {
+      record.calls.push(`updateCloudDisplayName:${name}`);
+      if (record.cloudNameError) throw new Error(record.cloudNameError);
     },
     getSyncState: async (farmId) => {
       record.calls.push(`getSyncState:${farmId}`);
@@ -105,6 +115,9 @@ function makeDeps(record: Recorded, overrides: Partial<SettingsDeps> = {}): Sett
     leaveFarm: async (farmId) => {
       record.calls.push(`leaveFarm:${farmId}`);
     },
+    signOut: async () => {
+      record.calls.push("signOut");
+    },
     confirm: (message) => {
       record.confirms.push(message);
       return record.confirmsWith;
@@ -124,7 +137,12 @@ test("load surfaces the stored display name", async () => {
   assert.equal(settings.snapshot().displayName, "Ada");
 });
 
-test("saveDisplayName persists and updates the view immediately", async () => {
+// --- Criterion 1: display name edit persists -------------------------------
+// Since ticket 84 the name has two homes: the local setting (identity store)
+// and the cloud row (`PATCH /me`). `saveDisplayName` writes both and returns
+// true only when the cloud confirmed, so "updated" always means synced.
+
+test("saveDisplayName persists locally and syncs the cloud name", async () => {
   const r = record();
   r.displayName = "Ada";
   const settings = createSettings(makeDeps(r));
@@ -132,7 +150,20 @@ test("saveDisplayName persists and updates the view immediately", async () => {
   const ok = await settings.saveDisplayName("  Grace  ");
   assert.equal(ok, true);
   assert.ok(r.calls.includes("setDisplayName:Grace"));
+  assert.ok(r.calls.includes("updateCloudDisplayName:Grace"));
   assert.equal(settings.snapshot().displayName, "Grace");
+  assert.equal(settings.snapshot().message, DISPLAY_NAME_SYNCED_MESSAGE);
+});
+
+test("saveDisplayName accepts a 64-character name like the backend does", async () => {
+  const r = record();
+  const settings = createSettings(makeDeps(r));
+  const name = "x".repeat(MAX_DISPLAY_NAME_LENGTH);
+
+  const ok = await settings.saveDisplayName(name);
+  assert.equal(ok, true);
+  assert.ok(r.calls.includes(`setDisplayName:${name}`));
+  assert.ok(r.calls.includes(`updateCloudDisplayName:${name}`));
 });
 
 test("saveDisplayName rejects a blank name without calling Tauri", async () => {
@@ -143,6 +174,49 @@ test("saveDisplayName rejects a blank name without calling Tauri", async () => {
   assert.equal(ok, false);
   assert.deepEqual(r.calls, []);
   assert.ok(settings.snapshot().error);
+});
+
+test("saveDisplayName rejects an over-long name instead of truncating", async () => {
+  const r = record();
+  const settings = createSettings(makeDeps(r));
+
+  const ok = await settings.saveDisplayName("x".repeat(MAX_DISPLAY_NAME_LENGTH + 1));
+  assert.equal(ok, false);
+  assert.deepEqual(r.calls, [], "the backend's 64-char cap is enforced up front");
+  assert.ok(settings.snapshot().error);
+});
+
+test("a failed cloud update leaves a clearly diverged local setting", async () => {
+  const r = record();
+  r.cloudNameError = "boom";
+  const settings = createSettings(makeDeps(r));
+
+  const ok = await settings.saveDisplayName("Grace");
+
+  assert.equal(ok, false, "no ambiguous success when only the local write landed");
+  assert.equal(settings.snapshot().displayName, "Grace", "the local name did change");
+  assert.equal(
+    settings.snapshot().error,
+    cloudUpdateFailedMessage("boom"),
+    "the error states the local/cloud split plainly",
+  );
+  assert.notEqual(settings.snapshot().message, DISPLAY_NAME_SYNCED_MESSAGE);
+  assert.ok(r.calls.includes("updateCloudDisplayName:Grace"));
+});
+
+test("a failed local write never reaches the cloud update", async () => {
+  const r = record();
+  const settings = createSettings(makeDeps(r, {
+    setDisplayName: async () => {
+      throw new Error("secureStore");
+    },
+  }));
+
+  const ok = await settings.saveDisplayName("Grace");
+
+  assert.equal(ok, false);
+  assert.equal(settings.snapshot().error, "secureStore");
+  assert.ok(!r.calls.some((c) => c.startsWith("updateCloudDisplayName")));
 });
 
 // --- Criterion 1 + 4: FS25 folder + slot surfaced by load ------------------
@@ -333,4 +407,40 @@ test("leave is skipped when the confirmation is declined", async () => {
   assert.equal(left, false);
   assert.equal(r.confirms.length, 1, "dialog was shown");
   assert.ok(!r.calls.includes("leaveFarm:f1"), "no backend call after declining");
+});
+
+// --- Ticket 83: Sign out ---------------------------------------------------
+
+test("signOut proceeds only after confirmation", async () => {
+  const r = record();
+  const settings = createSettings(makeDeps(r));
+
+  const ok = await settings.signOut();
+  assert.equal(ok, true);
+  assert.deepEqual(r.confirms, [signOutConfirmation()]);
+  assert.ok(r.calls.includes("signOut"));
+});
+
+test("signOut is skipped when the confirmation is declined", async () => {
+  const r = record();
+  r.confirmsWith = false;
+  const settings = createSettings(makeDeps(r));
+
+  const ok = await settings.signOut();
+  assert.equal(ok, false);
+  assert.equal(r.confirms.length, 1, "dialog was shown");
+  assert.ok(!r.calls.includes("signOut"), "no session change after declining");
+});
+
+test("signOut reports a failure to sign out locally", async () => {
+  const r = record();
+  const settings = createSettings(makeDeps(r, {
+    signOut: async () => {
+      throw new Error("secureStore");
+    },
+  }));
+
+  const ok = await settings.signOut();
+  assert.equal(ok, false);
+  assert.equal(settings.snapshot().error, "secureStore");
 });

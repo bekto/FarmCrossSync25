@@ -7,12 +7,9 @@
 //!
 //! | Command            | Params                                             | Ok result          |
 //! |--------------------|----------------------------------------------------|--------------------|
-//! | `scan_saves`       | `root?: string`                                    | `SaveCandidate[]`  |
 //! | `validate_save`    | `path: string`                                     | `ValidationResult` |
 //! | `read_metadata`    | `path: string`                                     | `SaveMetadata`     |
 //! | `compute_hash`     | `path: string`                                     | `HashResult`       |
-//! | `create_backup`    | `savePath: string`, `backupDir?: string`           | `BackupResult`     |
-//! | `replace_save`     | `targetPath: string`, `stagedPath: string`, `expectedHash?: string` | `ReplaceResult` |
 //! | `pack_save`        | `savePath: string`, `outDir?: string`              | `PackResult`       |
 //! | `cleanup_pack`     | `archivePath: string`                              | `()`               |
 //! | `open_temp_archive` | none                                              | `string` (temp path) |
@@ -38,8 +35,6 @@ use serde::{Deserialize, Serialize};
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(tag = "kind", rename_all = "camelCase")]
 pub enum Fs25Error {
-    /// The command exists but its implementation has not landed yet.
-    NotImplemented { command: String },
     /// The path does not exist or cannot be read.
     Inaccessible { path: String, message: String },
     /// Any other failure.
@@ -54,21 +49,9 @@ pub enum Fs25Error {
     },
 }
 
-impl Fs25Error {
-    /// Convenience constructor for the stub `NotImplemented` variant.
-    pub fn not_implemented(command: &str) -> Self {
-        Fs25Error::NotImplemented {
-            command: command.to_string(),
-        }
-    }
-}
-
 impl std::fmt::Display for Fs25Error {
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
         match self {
-            Fs25Error::NotImplemented { command } => {
-                write!(f, "not implemented: {command}")
-            }
             Fs25Error::Inaccessible { path, message } => {
                 write!(f, "inaccessible: {path} ({message})")
             }
@@ -82,20 +65,6 @@ impl std::fmt::Display for Fs25Error {
 }
 
 impl std::error::Error for Fs25Error {}
-
-/// A candidate savegame found by scanning the current OS.
-#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
-#[serde(rename_all = "camelCase")]
-pub struct SaveCandidate {
-    /// Save slot number, when it can be determined.
-    pub slot: Option<u32>,
-    /// Human-readable map name, when it can be determined.
-    pub map_name: Option<String>,
-    /// Absolute path to the savegame folder.
-    pub path: String,
-    /// Last-modified timestamp (RFC 3339), when available.
-    pub last_modified: Option<String>,
-}
 
 /// Validation states surfaced to the user (see FS25 Local Save spec).
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
@@ -298,7 +267,7 @@ pub struct SlotBinding {
 }
 
 // ---------------------------------------------------------------------------
-// Tauri commands (stubs -- all return NotImplemented until later tickets land).
+// Tauri commands
 // ---------------------------------------------------------------------------
 
 /// List the save slots in an FS25 folder: 1..=20 plus any `savegameN` with N > 20.
@@ -364,33 +333,6 @@ pub fn list_slot_bindings() -> Result<Vec<SlotBinding>, Fs25Error> {
     crate::fs25::sync_state::SyncStateStore::default_store().list_bindings()
 }
 
-/// Scan the current OS for candidate FS25 savegames.
-///
-/// When `root` is given, the native user-data layout is scanned under that
-/// directory instead of the OS default.
-#[tauri::command]
-pub fn scan_saves(root: Option<String>) -> Result<Vec<SaveCandidate>, Fs25Error> {
-    use crate::fs25::discovery;
-    use std::path::Path;
-
-    if let Some(root) = root.filter(|r| !r.is_empty()) {
-        let base = Path::new(&root);
-        #[cfg(target_os = "windows")]
-        return Ok(discovery::windows::scan_windows_in(base));
-        #[cfg(target_os = "linux")]
-        return Ok(discovery::linux::scan_linux_in(base));
-        #[cfg(not(any(target_os = "windows", target_os = "linux")))]
-        return Ok(Vec::new());
-    }
-
-    #[cfg(target_os = "windows")]
-    return Ok(discovery::windows::scan_windows());
-    #[cfg(target_os = "linux")]
-    return Ok(discovery::linux::scan_linux());
-    #[cfg(not(any(target_os = "windows", target_os = "linux")))]
-    return Ok(Vec::new());
-}
-
 /// Validate a folder as an FS25 savegame.
 ///
 /// Always resolves `Ok`: unreadable paths surface as
@@ -410,38 +352,6 @@ pub fn read_metadata(path: String) -> Result<SaveMetadata, Fs25Error> {
 #[tauri::command]
 pub fn compute_hash(path: String) -> Result<HashResult, Fs25Error> {
     crate::fs25::hash::compute(std::path::Path::new(&path))
-}
-
-/// Create a timestamped backup of a save folder.
-///
-/// `backup_dir` is the user-configured backup directory (Settings); when
-/// omitted or empty, the app data directory is used.
-#[tauri::command]
-pub fn create_backup(save_path: String, backup_dir: Option<String>) -> Result<BackupResult, Fs25Error> {
-    let save = std::path::Path::new(&save_path);
-    let root = backup_dir
-        .filter(|dir| !dir.is_empty())
-        .map(std::path::PathBuf::from);
-    crate::fs25::backup::create_backup(save, root.as_deref())
-}
-
-/// Transactionally replace a save folder, leaving the original recoverable on failure.
-///
-/// `staged_path` is an already-extracted directory of the new save content. The
-/// original is verified, backed up, and swapped out transactionally; sync-state
-/// persistence is owned by the calling flow, not this command.
-#[tauri::command]
-pub fn replace_save(
-    target_path: String,
-    staged_path: String,
-    expected_hash: Option<String>,
-) -> Result<ReplaceResult, Fs25Error> {
-    crate::fs25::replace::replace(
-        std::path::Path::new(&target_path),
-        std::path::Path::new(&staged_path),
-        expected_hash.as_deref(),
-        None,
-    )
 }
 
 /// Event name for pack progress, emitted while `pack_save` runs.

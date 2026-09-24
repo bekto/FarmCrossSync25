@@ -1,36 +1,20 @@
 // Error catalog, empty-state copy, and toast plumbing (ticket 39).
 //
-// Single source of truth for the spec-mandated error copy (desktop-ui:
-// "Toasts / error states for: no internet, upload failed (local save safe),
-// download failed (existing save not replaced), farm not found, already a
-// member, pending request, savegame not found, invalid save, hash mismatch").
+// Only situations the UI actually renders get an entry here (`no-internet`,
+// `farm-not-found`); upload/download/validation failures surface the copy
+// owned by their flows (upload.ts / download.ts), which already carries the
+// local-save-safety promise (desktop-ui edge case: "Failed cloud operations
+// always state that local data is safe"). The catalog entries nothing
+// rendered were removed with ticket 88.
 // DOM-, Tauri-, and network-free, so it runs under `node --test`; the Svelte
 // components stay thin and just render this text.
-//
-// Failure copy tells the truth about local-save safety: every entry in
-// LOCAL_SAVE_SAFE_ERRORS carries that promise (desktop-ui edge case: "Failed
-// cloud operations always state that local data is safe").
 
 import { writable } from "svelte/store";
 import { slotConflictMessage } from "./fs25.ts";
-import { LOCAL_SAVE_SAFE_MESSAGE } from "./upload.ts";
-import {
-  ORIGINAL_SAVE_RECOVERABLE_MESSAGE,
-  VERIFICATION_FAILED_MESSAGE,
-} from "./download.ts";
 import { NEED_INTERNET_MESSAGE } from "./session.ts";
 
-/** Every spec-mandated error situation. */
-export type ErrorKey =
-  | "no-internet"
-  | "upload-failed"
-  | "download-failed"
-  | "farm-not-found"
-  | "already-member"
-  | "pending-request"
-  | "savegame-not-found"
-  | "invalid-save"
-  | "hash-mismatch";
+/** Every catalog situation with a real renderer. */
+export type ErrorKey = "no-internet" | "farm-not-found";
 
 /**
  * User-facing copy per situation. The offline entry is the spec's exact
@@ -39,28 +23,8 @@ export type ErrorKey =
  */
 export const ERROR_MESSAGES: Record<ErrorKey, string> = {
   "no-internet": NEED_INTERNET_MESSAGE,
-  "upload-failed": `Upload failed. ${LOCAL_SAVE_SAFE_MESSAGE}`,
-  "download-failed": `Download failed. ${ORIGINAL_SAVE_RECOVERABLE_MESSAGE}`,
   "farm-not-found": "Farm not found. Check the farm code and try again.",
-  "already-member": "You are already a member of this farm.",
-  "pending-request":
-    "Your join request is pending. The farm owner needs to accept it.",
-  "savegame-not-found":
-    `Savegame not found. Choose an FS25 save folder and try again. ${LOCAL_SAVE_SAFE_MESSAGE}`,
-  "invalid-save":
-    `Invalid save. This folder is not an FS25 savegame. ${LOCAL_SAVE_SAFE_MESSAGE}`,
-  "hash-mismatch": `${VERIFICATION_FAILED_MESSAGE} ${ORIGINAL_SAVE_RECOVERABLE_MESSAGE}`,
 };
-
-/** Errors whose copy promises the local save is safe / unchanged. */
-export const LOCAL_SAVE_SAFE_ERRORS: ReadonlySet<ErrorKey> = new Set<ErrorKey>([
-  "no-internet",
-  "upload-failed",
-  "download-failed",
-  "savegame-not-found",
-  "invalid-save",
-  "hash-mismatch",
-]);
 
 /** Informative empty states (desktop-ui: no active farm, no saves, no requests). */
 export const EMPTY_STATES = {

@@ -129,8 +129,14 @@
   const session = createSession({
     getToken: getSessionToken,
     storeToken: storeSessionToken,
+    clearToken: clearSessionToken,
     getInstallationId: async () => (await getIdentity()).installationId,
     register: httpRegister(API_BASE_URL, fetch, handleUnauthorized),
+    // Ticket 83: `POST /logout` through the shared API client revokes this
+    // session server-side; sign-out proceeds locally even when it fails.
+    logout: async () => {
+      await api.post("/logout");
+    },
     onRequireDisplayName: () => {
       status = session.state;
       promptOpen = true;
@@ -471,6 +477,11 @@
   const settingsScreen = createSettings({
     getIdentity,
     setDisplayName,
+    // Ticket 84: the name other members see lives in the backend
+    // (`users.display_name`); sync it through the shared API client.
+    updateCloudDisplayName: async (name) => {
+      await api.request("/me", { method: "PATCH", body: { displayName: name } });
+    },
     getSyncState: readSyncState,
     getFs25Root,
     setFs25Root: async (path) => {
@@ -491,6 +502,9 @@
       if (!userId) throw new Error("Could not resolve the signed-in player.");
       await api.kickMember(farmId, userId);
     },
+    // Ticket 83: POST /logout, then clear the stored token + session cache and
+    // return to the registration prompt (safe when offline or already revoked).
+    signOut: () => session.signOut(),
     confirm,
   });
 

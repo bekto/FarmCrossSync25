@@ -3,10 +3,12 @@
 // DOM-, Tauri-, and network-free: every side effect is injected so the view
 // model can be built and refreshed under `node --test` with fakes and the
 // Svelte components stay thin. Spec (desktop-ui): "Farm screen: farm name +
-// code with copy, latest upload, player list (name, last upload time,
-// online-dot style indicator), primary actions Upload My Save and Download on
-// rows." "A dropdown on the Farm screen switches the active farm." "20-second
-// polling of invites and saves."
+// code with copy, latest upload, player list (name, last upload time, ...),
+// primary actions Upload My Save and Download on rows." "A dropdown on the
+// Farm screen switches the active farm." "20-second polling of invites and
+// saves." The sketch's online-dot indicator is deliberately not built: there
+// is no presence endpoint, so the dot could only fabricate presence from
+// upload recency (removed with ticket 88).
 //
 // The active-farm selection lives in uiState.ts; this module receives the id
 // and reloads farm detail/members/saves, restarting the poll for the new farm.
@@ -63,13 +65,6 @@ export interface PlayerRow {
   isOwner: boolean;
   lastUploadAt: string | null;
   save: PlayerSave | null;
-  /**
-   * The backend has no presence endpoint, so the "online dot" is derived from
-   * upload recency: a player counts as active when their last upload is within
-   * RECENT_UPLOAD_WINDOW_MS. Members with no save are always offline.
-   * Ticket 36+ can swap this for a real signal; the dot is presentational only.
-   */
-  online: boolean;
 }
 
 export interface FarmView {
@@ -81,9 +76,6 @@ export interface FarmView {
   actionError: string | null;
   actionMessage: string | null;
 }
-
-/** Upload recency window for the derived online dot (no presence endpoint). */
-export const RECENT_UPLOAD_WINDOW_MS = 5 * 60 * 1000;
 
 export interface FarmData {
   farm: FarmDetail;
@@ -120,24 +112,19 @@ function mostRecent(saves: PlayerSave[]): PlayerSave | null {
 
 /**
  * Pure view-model builder: join saves to members by `user_id` (last upload per
- * member, "never" when absent), compute the latest upload overall, and derive
- * the online dot from recency. Members order is preserved (backend sends
- * `joined_at ASC`).
+ * member, "never" when absent) and compute the latest upload overall. Members
+ * order is preserved (backend sends `joined_at ASC`).
  */
 export function buildFarmView(
   farm: FarmDetail,
   members: Member[],
   saves: PlayerSave[],
-  now: number = Date.now(),
 ): FarmData {
   const byUser = new Map<string, PlayerSave>();
   for (const save of saves) byUser.set(save.user_id, save);
 
   const players: PlayerRow[] = members.map((member) => {
     const save = byUser.get(member.user_id) ?? null;
-    const uploadedAt = save ? Date.parse(save.uploaded_at) : Number.NaN;
-    const online =
-      save !== null && now - uploadedAt <= RECENT_UPLOAD_WINDOW_MS;
     return {
       user_id: member.user_id,
       display_name: member.display_name,
@@ -145,7 +132,6 @@ export function buildFarmView(
       isOwner: member.role === "owner",
       lastUploadAt: save?.uploaded_at ?? null,
       save,
-      online,
     };
   });
 
@@ -172,7 +158,6 @@ export interface FarmScreenDeps {
     playerId: string;
     save: PlayerSave;
   }): Promise<ActionResult>;
-  now?(): number;
 }
 
 export interface FarmScreenOptions {
@@ -205,7 +190,6 @@ export function createFarmScreen(
     onError,
   }: FarmScreenOptions = {},
 ): FarmScreen {
-  const now = deps.now ?? Date.now;
   const state: FarmView = {
     farm: null,
     latestUpload: null,
@@ -252,7 +236,7 @@ export function createFarmScreen(
       ]);
       // Ignore a response that arrived after the user switched farms.
       if (currentFarmId !== farmId) return;
-      const data = buildFarmView(farm, members, saves, now());
+      const data = buildFarmView(farm, members, saves);
       state.farm = data.farm;
       state.latestUpload = data.latestUpload;
       state.players = data.players;

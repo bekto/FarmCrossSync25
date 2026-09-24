@@ -29,11 +29,7 @@
 </script>
 
 <li class="member-row">
-  <span class="avatar" aria-hidden="true">
-    {initials(row.display_name)}
-    <span class="dot" class:online={row.online}></span>
-  </span>
-  <span class="sr-only">{row.online ? "recently active" : "not recently active"}</span>
+  <span class="avatar" aria-hidden="true">{initials(row.display_name)}</span>
   <div class="who">
     <span class="name">
       <span class="name-text">{row.display_name}</span>
@@ -89,27 +85,6 @@
   }
   .member-row:hover + :global(.member-row) {
     border-top-color: transparent;
-  }
-  .dot {
-    position: absolute;
-    right: -1px;
-    bottom: -1px;
-    width: 0.7rem;
-    height: 0.7rem;
-    border-radius: 50%;
-    background: var(--surface-3);
-    border: 2px solid var(--surface);
-  }
-  .dot.online {
-    background: var(--accent);
-  }
-  .sr-only {
-    position: absolute;
-    width: 1px;
-    height: 1px;
-    overflow: hidden;
-    clip-path: inset(50%);
-    white-space: nowrap;
   }
   .who {
     display: flex;

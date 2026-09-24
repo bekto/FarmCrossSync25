@@ -66,15 +66,13 @@ function fakeScheduler() {
 const flush = () => new Promise((resolve) => setTimeout(resolve, 0));
 
 test("buildFarmView joins saves to members and picks the latest upload", () => {
-  const now = Date.parse("2026-01-10T10:02:00Z");
-  const view = buildFarmView(FARM, MEMBERS, SAVES, now);
+  const view = buildFarmView(FARM, MEMBERS, SAVES);
 
   assert.equal(view.farm.code, "X7K9-PQ2");
   assert.equal(view.players.length, 3);
 
   const [ada, ben, cleo] = view.players;
   assert.equal(ada.lastUploadAt, "2026-01-10T10:00:00Z");
-  assert.equal(ada.online, true, "recent upload drives the derived dot");
   assert.equal(ben.lastUploadAt, "2026-01-10T12:00:00Z");
   assert.equal(cleo.lastUploadAt, null, "member without a save shows never");
   assert.equal(cleo.save, null);
@@ -84,12 +82,6 @@ test("buildFarmView joins saves to members and picks the latest upload", () => {
   assert.ok(view.latestUpload);
   assert.equal(view.latestUpload?.user_id, "u2");
   assert.equal(view.latestUpload?.uploaded_at, "2026-01-10T12:00:00Z");
-});
-
-test("a member with an old upload is not shown as online", () => {
-  const now = Date.parse("2026-01-10T13:00:00Z");
-  const view = buildFarmView(FARM, MEMBERS, SAVES, now);
-  assert.equal(view.players[0].online, false, "upload older than the window");
 });
 
 test("copyCode invokes the injected clipboard with the farm code", async () => {

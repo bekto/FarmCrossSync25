@@ -7,13 +7,6 @@ import { listen, type UnlistenFn } from "@tauri-apps/api/event";
 
 export type ValidationState = "valid" | "suspicious" | "invalid" | "inaccessible";
 
-export interface SaveCandidate {
-  slot: number | null;
-  mapName: string | null;
-  path: string;
-  lastModified: string | null;
-}
-
 export interface ValidationResult {
   state: ValidationState;
   path: string;
@@ -36,18 +29,6 @@ export interface SaveMetadata {
 export interface HashResult {
   path: string;
   hash: string;
-}
-
-export interface BackupResult {
-  backupPath: string;
-  createdAt: string;
-  pruned: string[];
-}
-
-export interface ReplaceResult {
-  replaced: boolean;
-  backupPath: string | null;
-  contentHash: string;
 }
 
 export interface PackResult {
@@ -105,7 +86,6 @@ export interface SlotBinding {
 }
 
 export type Fs25Error =
-  | { kind: "notImplemented"; command: string }
   | { kind: "inaccessible"; path: string; message: string }
   | { kind: "internal"; message: string }
   | { kind: "slotConflict"; slot: number; ownerFarmId: string };
@@ -119,10 +99,6 @@ export function slotConflictMessage(slot: number): string {
   return `Slot ${slot} is already linked to another farm; choose a different slot`;
 }
 
-export function scanSaves(root?: string | null): Promise<SaveCandidate[]> {
-  return invoke("scan_saves", { root: root ?? null });
-}
-
 export function validateSave(path: string): Promise<ValidationResult> {
   return invoke("validate_save", { path });
 }
@@ -133,25 +109,6 @@ export function readMetadata(path: string): Promise<SaveMetadata> {
 
 export function computeHash(path: string): Promise<HashResult> {
   return invoke("compute_hash", { path });
-}
-
-export function createBackup(
-  savePath: string,
-  backupDir?: string | null,
-): Promise<BackupResult> {
-  return invoke("create_backup", { savePath, backupDir: backupDir ?? null });
-}
-
-export function replaceSave(
-  targetPath: string,
-  stagedPath: string,
-  expectedHash?: string | null,
-): Promise<ReplaceResult> {
-  return invoke("replace_save", {
-    targetPath,
-    stagedPath,
-    expectedHash: expectedHash ?? null,
-  });
 }
 
 export function cleanupPack(archivePath: string): Promise<void> {

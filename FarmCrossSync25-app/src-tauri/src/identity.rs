@@ -38,8 +38,7 @@
 //! fail. To keep the app usable there, [`default_secret_store`] probes the OS
 //! keyring once and falls back to [`FileSecretStore`] — a `0600` file next to
 //! `identity.json` — when it is unavailable. This is a deliberate, documented
-//! downgrade from "OS secure storage"; `secret_store_kind` reports which store
-//! is active so the UI can warn.
+//! downgrade from "OS secure storage".
 
 use std::path::PathBuf;
 
@@ -399,16 +398,6 @@ pub fn default_secret_store() -> Box<dyn SecretStore> {
     }
 }
 
-/// Which store [`default_secret_store`] selects: `"keyring"` or `"file"`.
-#[tauri::command]
-pub fn secret_store_kind() -> String {
-    if keyring::Entry::store_status().is_ok() {
-        "keyring".to_string()
-    } else {
-        "file".to_string()
-    }
-}
-
 // ---------------------------------------------------------------------------
 // Tauri commands
 // ---------------------------------------------------------------------------
@@ -740,11 +729,5 @@ mod tests {
         store.clear().unwrap();
 
         let _ = std::fs::remove_dir_all(&dir);
-    }
-
-    #[test]
-    fn secret_store_kind_is_reported() {
-        let kind = secret_store_kind();
-        assert!(kind == "keyring" || kind == "file", "unexpected kind {kind}");
     }
 }

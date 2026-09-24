@@ -30,11 +30,18 @@ export type RegisterFn = (
   displayName: string,
 ) => Promise<{ token: string }>;
 
+/** Server-side session revocation (`POST /logout` through the API client). */
+export type LogoutFn = () => Promise<void>;
+
 export interface SessionDeps {
   getToken(): Promise<string | null>;
   storeToken(token: string): Promise<void>;
+  /** Remove the stored session token (`clear_session_token`, ticket 83). */
+  clearToken(): Promise<void>;
   getInstallationId(): Promise<string>;
   register: RegisterFn;
+  /** Revoke the session server-side; may fail offline (ticket 83). */
+  logout: LogoutFn;
   onRequireDisplayName(): void;
   onError?(error: Error): void;
 }
@@ -52,6 +59,14 @@ export interface Session {
    * `clear_session_token` before calling this (ticket 76).
    */
   handleUnauthorized(): void;
+  /**
+   * Explicit sign-out (ticket 83): revoke the session server-side, then remove
+   * the stored token and the cached one and return to the registration prompt.
+   * Offline or already-revoked sessions still sign out locally — the user is
+   * never stranded. Any queued cloud action is dropped: signing out means the
+   * user is leaving, so nothing runs behind their back after re-registering.
+   */
+  signOut(): Promise<void>;
 }
 
 export function createSession(deps: SessionDeps): Session {
@@ -69,6 +84,25 @@ export function createSession(deps: SessionDeps): Session {
     // Null (not undefined) on purpose: the token is known-rejected, so it must
     // never be re-served from the cache even if the store clear failed.
     token = null;
+    error = null;
+    state = "awaitingName";
+    deps.onRequireDisplayName();
+  }
+
+  async function signOut(): Promise<void> {
+    // Server-side revocation is best-effort: offline or already-revoked must
+    // never strand the user, so a failed `/logout` is swallowed and the local
+    // sign-out below always runs.
+    try {
+      await deps.logout();
+    } catch {
+      // The stored token is revoked-or-gone either way once it is cleared.
+    }
+    // Drop the cached token and any queued action before the store clear, so
+    // nothing can re-serve the revoked token even if the clear itself fails.
+    token = null;
+    pending = null;
+    await deps.clearToken();
     error = null;
     state = "awaitingName";
     deps.onRequireDisplayName();
@@ -140,6 +174,7 @@ export function createSession(deps: SessionDeps): Session {
     runCloudAction,
     submitDisplayName,
     handleUnauthorized,
+    signOut,
   };
 }
 

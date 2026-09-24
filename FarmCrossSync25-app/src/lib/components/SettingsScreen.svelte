@@ -97,6 +97,12 @@
     busy = false;
     if (left && onLeft) onLeft();
   }
+
+  async function signOut() {
+    busy = true;
+    await screen.signOut();
+    busy = false;
+  }
 </script>
 
 <section class="settings">
@@ -127,7 +133,7 @@
             bind:value={nameDraft}
             placeholder="Display name"
             aria-label="Display name"
-            maxlength="32"
+            maxlength="64"
             disabled={busy}
           />
           <button
@@ -219,6 +225,20 @@
         <div class="control">
           <button class="danger" onclick={leave} disabled={busy}>
             <Icon name="logout" size={15} />Leave Farm
+          </button>
+        </div>
+      </div>
+      <div class="row">
+        <div class="label">
+          <h3>Sign out</h3>
+          <p class="muted">
+            Ends this device's cloud session. Your local saves and settings stay
+            on this device.
+          </p>
+        </div>
+        <div class="control">
+          <button onclick={signOut} disabled={busy}>
+            <Icon name="logout" size={15} />Sign out
           </button>
         </div>
       </div>

@@ -9,32 +9,16 @@ import {
   errorMessage,
   friendlyErrorMessage,
   isNetworkError,
-  LOCAL_SAVE_SAFE_ERRORS,
   pushToast,
   showError,
   toasts,
   type ErrorKey,
 } from "./errors.ts";
 import { NEED_INTERNET_MESSAGE } from "./session.ts";
-import { LOCAL_SAVE_SAFE_MESSAGE } from "./upload.ts";
-import {
-  ORIGINAL_SAVE_RECOVERABLE_MESSAGE,
-  VERIFICATION_FAILED_MESSAGE,
-} from "./download.ts";
 
-const KEYS: ErrorKey[] = [
-  "no-internet",
-  "upload-failed",
-  "download-failed",
-  "farm-not-found",
-  "already-member",
-  "pending-request",
-  "savegame-not-found",
-  "invalid-save",
-  "hash-mismatch",
-];
+const KEYS: ErrorKey[] = ["no-internet", "farm-not-found"];
 
-test("catalog covers every spec error with non-empty copy", () => {
+test("catalog covers every rendered error with non-empty copy", () => {
   for (const key of KEYS) {
     assert.equal(typeof ERROR_MESSAGES[key], "string", `${key} is present`);
     assert.ok(ERROR_MESSAGES[key].length > 0, `${key} has copy`);
@@ -48,31 +32,6 @@ test("offline copy is the exact spec wording and promises local safety", () => {
     "Unable to connect to cloud. Your local save has not been changed.",
   );
   assert.equal(ERROR_MESSAGES["no-internet"], NEED_INTERNET_MESSAGE);
-});
-
-test("upload / download / verify failures state the local save is safe", () => {
-  assert.ok(ERROR_MESSAGES["upload-failed"].includes(LOCAL_SAVE_SAFE_MESSAGE));
-  assert.ok(
-    ERROR_MESSAGES["download-failed"].includes(ORIGINAL_SAVE_RECOVERABLE_MESSAGE),
-  );
-  assert.ok(
-    ERROR_MESSAGES["hash-mismatch"].includes(VERIFICATION_FAILED_MESSAGE),
-  );
-  assert.ok(
-    ERROR_MESSAGES["hash-mismatch"].includes(ORIGINAL_SAVE_RECOVERABLE_MESSAGE),
-  );
-});
-
-test("every local-save-safe entry carries a safety promise", () => {
-  const promise =
-    /local save is unchanged and safe|original save is unchanged and recoverable|local save has not been changed/i;
-  for (const key of LOCAL_SAVE_SAFE_ERRORS) {
-    assert.match(ERROR_MESSAGES[key], promise, `${key} promises safety`);
-  }
-  assert.ok(LOCAL_SAVE_SAFE_ERRORS.has("no-internet"));
-  assert.ok(LOCAL_SAVE_SAFE_ERRORS.has("upload-failed"));
-  assert.ok(LOCAL_SAVE_SAFE_ERRORS.has("download-failed"));
-  assert.ok(LOCAL_SAVE_SAFE_ERRORS.has("hash-mismatch"));
 });
 
 test("empty states are informative", () => {
@@ -105,17 +64,17 @@ test("friendlyErrorMessage maps known situations and keeps service copy", () => 
     friendlyErrorMessage("farm not found"),
     ERROR_MESSAGES["farm-not-found"],
   );
-  const serviceCopy = `Upload failed: boom. ${LOCAL_SAVE_SAFE_MESSAGE}`;
+  const serviceCopy = "Upload failed: boom. Your local save is unchanged and safe.";
   assert.equal(friendlyErrorMessage(serviceCopy), serviceCopy);
 });
 
 test("toasts push, carry the catalog copy, and dismiss", () => {
   clearAll();
-  const id = showError("upload-failed");
+  const id = showError("no-internet");
   const list = get(toasts);
   assert.equal(list.length, 1);
-  assert.equal(list[0].message, ERROR_MESSAGES["upload-failed"]);
-  assert.equal(list[0].key, "upload-failed");
+  assert.equal(list[0].message, ERROR_MESSAGES["no-internet"]);
+  assert.equal(list[0].key, "no-internet");
   assert.equal(list[0].id, id);
 
   pushToast("raw message");

@@ -21,7 +21,7 @@
 //! ticket). Temporary siblings are cleaned up on both success and failure.
 //!
 //! Sync-state persistence is *not* this module's concern: the caller/flow
-//! records the new local hash after this command resolves. [`ReplaceResult`]
+//! records the new local hash after this function resolves. [`ReplaceResult`]
 //! reports `replaced = true` only once the swap has completed, so a failed or
 //! interrupted replace can never signal success.
 

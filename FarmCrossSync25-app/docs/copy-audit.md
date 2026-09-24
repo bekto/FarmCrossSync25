@@ -23,7 +23,7 @@ not visually: this environment is headless (no GUI).
 | FS25 folder selection (auto-detect + Select Folder) with a slot preview | `fs25Root.ts`, `SlotPicker.svelte` | FS25 folder onboarding |
 | Size warning above ~200 MB | `upload.ts` `SIZE_WARNING_MESSAGE` | `ConfirmDialog` (confirmed or dismissed before upload proceeds) |
 | Kick / leave delete the cloud save, local save untouched | `ownerActions.ts` `kickConfirmation`; `settings.ts` `leaveConfirmation` | confirmation dialog; leave blurb |
-| Error states: no internet, upload failed, download failed, farm not found, already member, pending request, savegame not found, invalid save, hash mismatch | `errors.ts` `ERROR_MESSAGES` (one entry per `ErrorKey`) | toasts |
+| Error states surfaced through `friendlyErrorMessage`: offline, invalid farm, upload/download failures, savegame problems, hash mismatch | `errors.ts` `ERROR_MESSAGES` (rendered keys `no-internet`, `farm-not-found`); flow-specific copy in `upload.ts` / `download.ts` | toasts |
 
 ## Empty states
 
@@ -58,10 +58,11 @@ destructive choice is never a bare "Confirm".
 - Transfer confirmation adds "You remain a member. Your local save is
   untouched." The spec only requires a confirming dialog; this states the
   consequences explicitly.
-- `farm-not-found`, `already-member`, and `pending-request` do **not** carry a
-  local-save promise: those requests never touch local files, so the promise
-  is reserved for failures that could affect a save (offline, upload, download,
-  savegame-not-found, invalid-save, hash-mismatch).
+- `farm-not-found` does **not** carry a local-save promise: that request never
+  touches local files. The `errors.ts` catalog is trimmed to the keys actually
+  rendered (`no-internet`, `farm-not-found`); upload/download/savegame/membership
+  failures carry their own flow-specific copy (see below) rather than a shared
+  catalog entry.
 - Upload/download failure copy uses the phrases "local save is unchanged and
   safe" / "original save is unchanged and recoverable" rather than reusing the
   offline sentence; the spec requires the promise, not specific wording. The

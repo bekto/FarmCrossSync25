@@ -11,6 +11,8 @@ import {
 function fakeDeps(overrides: Record<string, unknown> = {}) {
   const calls = {
     stored: [] as string[],
+    cleared: 0,
+    logout: 0,
     requiredName: 0,
     errors: [] as Error[],
     actions: 0,
@@ -20,8 +22,14 @@ function fakeDeps(overrides: Record<string, unknown> = {}) {
     storeToken: async (t: string) => {
       calls.stored.push(t);
     },
+    clearToken: async () => {
+      calls.cleared += 1;
+    },
     getInstallationId: async () => "install-1",
     register: async (_id: string, _name: string) => ({ token: "tok-1" }),
+    logout: async () => {
+      calls.logout += 1;
+    },
     onRequireDisplayName: () => {
       calls.requiredName++;
     },
@@ -167,6 +175,89 @@ test("handleUnauthorized drops the cached token and returns to the prompt", asyn
   assert.equal(calls.actions, 1);
   assert.equal(calls.requiredName, 2);
   assert.equal(session.isRegistered, false);
+});
+
+// --- Ticket 83: sign-out ---------------------------------------------------
+
+test("signOut revokes the session, clears both tokens, and returns to the prompt", async () => {
+  const { deps, calls } = fakeDeps({ getToken: async () => "live-token" });
+  const session = createSession(deps);
+  await session.runCloudAction(async () => {
+    calls.actions += 1;
+  });
+  assert.equal(calls.actions, 1, "the cached token ran the first action");
+
+  await session.signOut();
+
+  assert.equal(calls.logout, 1, "POST /logout revokes the session server-side");
+  assert.equal(calls.cleared, 1, "the stored local token is removed");
+  assert.equal(session.state, "awaitingName");
+  assert.equal(session.isRegistered, false);
+  assert.equal(calls.requiredName, 1, "back at the registration prompt");
+
+  // The cached token is gone too: the next cloud action defers to the prompt
+  // instead of reusing the revoked token.
+  const result = await session.runCloudAction(async () => {
+    calls.actions += 1;
+  });
+  assert.equal(result, undefined);
+  assert.equal(calls.actions, 1);
+});
+
+test("sign-out still clears local credentials when /logout fails", async () => {
+  const { deps, calls } = fakeDeps({
+    getToken: async () => "live-token",
+    logout: async () => {
+      throw new TypeError("fetch failed");
+    },
+  });
+  const session = createSession(deps);
+  await session.runCloudAction(async () => {
+    calls.actions += 1;
+  });
+
+  await session.signOut();
+
+  assert.equal(calls.cleared, 1, "offline / already-revoked must not strand the user");
+  assert.equal(session.state, "awaitingName");
+  assert.equal(calls.requiredName, 1);
+});
+
+test("sign-out drops the queued action so nothing resumes behind the user's back", async () => {
+  const { deps, calls } = fakeDeps();
+  const session = createSession(deps);
+  // Unregistered: the action queues behind the display-name prompt.
+  await session.runCloudAction(async () => {
+    calls.actions += 1;
+  });
+  assert.equal(calls.actions, 0);
+
+  await session.signOut();
+  await session.submitDisplayName("Ada");
+
+  assert.equal(calls.actions, 0, "the pre-sign-out action was dropped, not resumed");
+});
+
+test("registering again after sign-out stores only the fresh token", async () => {
+  const { deps, calls } = fakeDeps({
+    getToken: async () => "tok-1",
+    register: async () => ({ token: "tok-2" }),
+  });
+  const session = createSession(deps);
+  await session.runCloudAction(async () => {
+    calls.actions += 1;
+  });
+
+  await session.signOut();
+  const ok = await session.submitDisplayName("Ada");
+
+  assert.equal(ok, true);
+  assert.deepEqual(
+    calls.stored,
+    ["tok-2"],
+    "the explicitly revoked token is never re-stored",
+  );
+  assert.equal(session.state, "registered");
 });
 
 function jsonFetch(
