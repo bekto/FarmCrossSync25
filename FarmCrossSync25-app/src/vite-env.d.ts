@@ -1,0 +1,7 @@
+/// <reference types="vite/client" />
+
+interface ImportMetaEnv {
+  readonly VITE_API_BASE_URL?: string;
+  /** local | staging | production; default local. */
+  readonly VITE_APP_ENV?: string;
+}

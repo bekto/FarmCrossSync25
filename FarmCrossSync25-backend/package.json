@@ -1,0 +1,23 @@
+{
+  "name": "farm-crosssync-backend",
+  "private": true,
+  "type": "module",
+  "scripts": {
+    "dev": "wrangler dev",
+    "deploy": "wrangler deploy",
+    "r2:check": "bash scripts/r2-roundtrip-check.sh",
+    "identity:check": "bash scripts/identity-check.sh",
+    "upload:check": "bash scripts/upload-check.sh",
+    "download:check": "bash scripts/download-check.sh",
+    "test": "node --test src/farms.test.mjs src/authz.test.mjs",
+    "typecheck": "tsc --noEmit"
+  },
+  "dependencies": {
+    "hono": "^4.6.14"
+  },
+  "devDependencies": {
+    "@cloudflare/workers-types": "^5.20260921.1",
+    "typescript": "^5.7.2",
+    "wrangler": "^4.0.0"
+  }
+}

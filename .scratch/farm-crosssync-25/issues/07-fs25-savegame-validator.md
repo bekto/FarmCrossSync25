@@ -6,12 +6,14 @@
 
 **Blocked by:** 04 (and a real FS25 savegame for marker inspection — see SPEC.md open questions)
 
-**Status:** pending
+**Status:** done
 
-- [ ] A real FS25 savegame folder validates as Valid and reports map and last-modified
-- [ ] A folder missing some expected files validates as Suspicious
-- [ ] An unrelated folder validates as Invalid
-- [ ] An unreadable folder validates as Inaccessible
-- [ ] Marker rules are documented in one place after inspecting the real save, with no invented file names
+- [x] A real FS25 savegame folder validates as Valid and reports map and last-modified
+- [x] A folder missing some expected files validates as Suspicious
+- [x] An unrelated folder validates as Invalid
+- [x] An unreadable folder validates as Inaccessible
+- [x] Marker rules are documented in one place after inspecting the real save, with no invented file names
 
 ## Work Log
+- Done: Validator in `validator.rs` (state enum + map/mtime) against real save markers: core `careerSavegame.xml`, expected `farms.xml`/`players.xml`/`environment.xml`. Wired `validate_save` command. Real save → Valid, map "Zielonka"; `cargo test --lib` 11 passed. Rules documented in module docs.
+- Assumption: last-modified = folder filesystem mtime (not internal `saveDate`); map from `<mapTitle>` fallback `<mapId>`; `validate_save` returns Ok with Inaccessible state rather than Err. Real save read-only.

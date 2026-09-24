@@ -6,11 +6,13 @@
 
 **Blocked by:** 07
 
-**Status:** pending
+**Status:** done
 
-- [ ] Metadata includes slot, map name, last-modified, path, and size
-- [ ] Extraction reads only lightweight metadata files, not the entire save
-- [ ] Metadata for a real savegame matches what the save actually reports
-- [ ] A save missing optional metadata still returns partial results without error
+- [x] Metadata includes slot, map name, last-modified, path, and size
+- [x] Extraction reads only lightweight metadata files, not the entire save
+- [x] Metadata for a real savegame matches what the save actually reports
+- [x] A save missing optional metadata still returns partial results without error
 
 ## Work Log
+- Done: `metadata::extract` returns slot/map/mtime/path/size (size walked from file metadata only); reads only `careerSavegame.xml`. Real save → slot 1, map "Zielonka", 38303104 bytes. `read_metadata` command wired; `cargo test --lib` 15 passed.
+- Assumption: `content_hash` left empty (hashing is ticket 09 and would read the whole save). Missing path = Err(Inaccessible); missing internal metadata = partial Ok.

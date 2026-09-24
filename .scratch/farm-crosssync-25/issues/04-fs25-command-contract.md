@@ -6,11 +6,13 @@
 
 **Blocked by:** 01
 
-**Status:** pending
+**Status:** done
 
-- [ ] The frontend can invoke every listed command and receive a typed success or error result
-- [ ] Each command's parameters and result fields are named and documented in one place
-- [ ] `cargo build` exits 0
-- [ ] Calling a stub returns a structured not-implemented error rather than crashing
+- [x] The frontend can invoke every listed command and receive a typed success or error result
+- [x] Each command's parameters and result fields are named and documented in one place
+- [x] `cargo build` exits 0
+- [x] Calling a stub returns a structured not-implemented error rather than crashing
 
 ## Work Log
+- Done: Added `fs25/contract.rs` (typed params/results + 8 Tauri commands returning structured `NotImplemented`), registered in `lib.rs`, typed TS wrappers in `src/lib/fs25.ts`. `cargo build`, `cargo test --lib fs25::contract`, `npm run build`/`check` all pass.
+- Assumption: command set (scan, validate, metadata, hash, backup, replace, sync-state read/write) and fields derived from FS25 spec; camelCase over the wire.

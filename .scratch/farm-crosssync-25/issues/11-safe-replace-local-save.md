@@ -6,12 +6,14 @@
 
 **Blocked by:** 09, 10
 
-**Status:** pending
+**Status:** done
 
-- [ ] Replace extracts to a temporary location, verifies the content hash, then swaps into place
-- [ ] A backup is created before the original is moved aside
-- [ ] A hash mismatch aborts and leaves the original save untouched
-- [ ] An interrupted replace leaves the original save untouched
-- [ ] Local sync state is updated only after a successful swap
+- [x] Replace extracts to a temporary location, verifies the content hash, then swaps into place
+- [x] A backup is created before the original is moved aside
+- [x] A hash mismatch aborts and leaves the original save untouched
+- [x] An interrupted replace leaves the original save untouched
+- [x] Local sync state is updated only after a successful swap
 
 ## Work Log
+- Done: New `replace.rs` — copy staged dir to sibling temp, verify staged hash vs `expected_hash`, backup original, rename-swap with rollback on failure. `replace_save` command wired. `cargo test --lib` 31 passed (5 replace tests incl. failpoint rollback).
+- Assumption: `staged_path` is an already-extracted directory (zip extraction is ticket 31); sync-state persistence owned by caller/flow (ticket 31), replace never touches it; `ReplaceResult{replaced:true}` only after swap. Rename non-atomic across target path (`ponytail:` noted).
