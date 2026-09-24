@@ -8,6 +8,7 @@
 import { test } from "node:test";
 import assert from "node:assert/strict";
 import { createHash } from "node:crypto";
+import { SESSION_TTL_MS } from "./identity.ts";
 import { makeEnv, req, registerUser } from "./test-harness.mjs";
 
 // Same hashing the Worker uses (SHA-256 hex of the raw token), so tests can
@@ -34,7 +35,6 @@ test("session expiry and revocation (integration)", async (t) => {
   });
 
   await t.test("register stores an expiry one SESSION_TTL_MS in the future", async () => {
-    const { SESSION_TTL_MS } = await import("./index.ts");
     assert.equal(SESSION_TTL_MS, 30 * 24 * 60 * 60 * 1000, "30 days");
 
     const env = makeEnv();

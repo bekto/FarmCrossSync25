@@ -63,7 +63,9 @@ Migration `0002_identity.sql` creates `users` and `sessions`; migration
 
 **Sessions:** the raw token (32 random bytes, hex) is returned once at registration and
 stored only as a SHA-256 hash in `sessions`. A session is valid for
-`SESSION_TTL_MS` (30 days — the exported constant in `src/index.ts`) via
+`SESSION_TTL_MS` (30 days — the exported constant in `src/identity.ts`;
+constants live outside `src/index.ts` because a Workers entry module may only
+export request handlers) via
 `sessions.expires_at`; migration `0006_session_expiry.sql` backfills pre-existing
 rows to migration run time + 30 days so they remain valid. Expired, revoked,
 missing, and unknown tokens all get the identical `401 {"error":"unauthorized"}`

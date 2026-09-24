@@ -6,6 +6,7 @@
 // `users.display_name`, and every list that renders names reads it back out.
 import { test } from "node:test";
 import assert from "node:assert/strict";
+import { MAX_DISPLAY_NAME_LENGTH } from "./identity.ts";
 import {
   makeEnv,
   req,
@@ -98,7 +99,6 @@ test("display-name cloud sync (integration)", async (t) => {
   });
 
   await t.test("over-long names get a distinct 400 and are never truncated; 64 chars are accepted", async () => {
-    const { MAX_DISPLAY_NAME_LENGTH } = await import("./index.ts");
     assert.equal(MAX_DISPLAY_NAME_LENGTH, 64, "matches the client's input cap");
 
     const env = makeEnv();
