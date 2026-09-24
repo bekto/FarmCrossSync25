@@ -1,9 +1,8 @@
 import { test } from "node:test";
 import assert from "node:assert/strict";
 import { createPutToR2, isLocalDevAuthorization } from "./uploadTransport.ts";
+import type { PutArchiveRequest } from "./uploadTransport.ts";
 import type { UploadAuthorization } from "./upload.ts";
-
-const BYTES = new Uint8Array([1, 2, 3, 4]);
 
 function auth(overrides: Partial<UploadAuthorization> = {}): UploadAuthorization {
   return {
@@ -16,50 +15,44 @@ function auth(overrides: Partial<UploadAuthorization> = {}): UploadAuthorization
   };
 }
 
-type Call = { url: string; init: RequestInit | undefined };
-
 function recorder(status = 200) {
-  const calls: Call[] = [];
-  const fetchImpl: typeof fetch = async (input, init) => {
-    calls.push({ url: String(input), init: init ?? undefined });
-    return new Response(null, { status });
+  const calls: PutArchiveRequest[] = [];
+  return {
+    calls,
+    putArchive: async (request: PutArchiveRequest) => {
+      calls.push(request);
+      return status;
+    },
   };
-  return { calls, fetchImpl };
 }
 
-test("presigned authorization PUTs the archive bytes to the signed URL with its headers", async () => {
-  const { calls, fetchImpl } = recorder();
-  const put = createPutToR2({
-    baseUrl: "http://localhost:8787",
-    readFile: async () => BYTES,
-    fetchImpl,
-  });
+test("presigned authorization streams the archive file to the signed URL with its headers", async () => {
+  const { calls, putArchive } = recorder();
+  const put = createPutToR2({ baseUrl: "http://localhost:8787", putArchive });
 
   const authorization = auth({ presigned: true });
   await put({
     archivePath: "/tmp/save.zip",
-    sizeBytes: BYTES.length,
+    sizeBytes: 1234,
     authorization,
   });
 
   assert.equal(calls.length, 1);
-  assert.equal(calls[0].url, authorization.url);
-  assert.equal(calls[0].init?.method, "PUT");
-  assert.deepEqual(calls[0].init?.headers, authorization.headers);
-  assert.equal(calls[0].init?.body, BYTES);
+  assert.deepEqual(calls[0], {
+    url: authorization.url,
+    method: "PUT",
+    headers: authorization.headers,
+    archivePath: "/tmp/save.zip",
+  });
 });
 
 test("placeholder authorization falls back to the Worker /r2-test route with an encoded key", async () => {
-  const { calls, fetchImpl } = recorder();
-  const put = createPutToR2({
-    baseUrl: "http://localhost:8787/",
-    readFile: async () => BYTES,
-    fetchImpl,
-  });
+  const { calls, putArchive } = recorder();
+  const put = createPutToR2({ baseUrl: "http://localhost:8787/", putArchive });
 
   await put({
     archivePath: "/tmp/save.zip",
-    sizeBytes: BYTES.length,
+    sizeBytes: 1234,
     authorization: auth({
       presigned: false,
       url: "https://<R2_ACCOUNT_ID>.r2.cloudflarestorage.com/<R2_BUCKET>/farms/f1/players/u1/save",
@@ -70,23 +63,19 @@ test("placeholder authorization falls back to the Worker /r2-test route with an 
     calls[0].url,
     "http://localhost:8787/r2-test/farms%2Ff1%2Fplayers%2Fu1%2Fsave",
   );
-  assert.equal(calls[0].init?.method, "PUT");
-  assert.equal(calls[0].init?.headers, undefined, "placeholder host header is not sent");
-  assert.equal(calls[0].init?.body, BYTES);
+  assert.equal(calls[0].method, "PUT");
+  assert.equal(calls[0].headers, undefined, "placeholder host header is not sent");
+  assert.equal(calls[0].archivePath, "/tmp/save.zip");
 });
 
-test("a non-ok storage response rejects and reports the status", async () => {
-  const { fetchImpl } = recorder(500);
-  const put = createPutToR2({
-    baseUrl: "http://localhost:8787",
-    readFile: async () => BYTES,
-    fetchImpl,
-  });
+test("a non-ok storage status rejects and reports the status", async () => {
+  const { putArchive } = recorder(500);
+  const put = createPutToR2({ baseUrl: "http://localhost:8787", putArchive });
 
   await assert.rejects(
     put({
       archivePath: "/tmp/save.zip",
-      sizeBytes: BYTES.length,
+      sizeBytes: 1234,
       authorization: auth({ presigned: true }),
     }),
     /Upload to storage failed \(500\)/,

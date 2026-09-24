@@ -11,8 +11,8 @@
 //! first file, `100` after the archive is complete, and intermediate values are
 //! proportional to bytes written (monotonic non-decreasing).
 
-use std::fs::File;
-use std::io::{self, BufReader};
+use std::fs::{File, OpenOptions};
+use std::io::{self, BufReader, Write};
 use std::path::{Path, PathBuf};
 
 use zip::write::SimpleFileOptions;
@@ -104,23 +104,72 @@ pub fn new_unpack_dir() -> PathBuf {
     std::env::temp_dir().join(format!("{UNPACK_PREFIX}{}", uuid::Uuid::new_v4()))
 }
 
-/// Persist downloaded archive bytes to a fresh temp file and return its path.
-///
-/// The frontend has no filesystem plugin: the download transport hands the
-/// bytes fetched from storage here, and [`unpack_save`] extracts the result. The
+/// Create a fresh, empty temp file for streamed download writes and return its
+/// path. Chunks fetched from storage are appended one at a time with
+/// [`append_download_chunk`], so the full archive never exists in memory; the
 /// caller owns the file and must remove it with [`cleanup_pack`].
-pub fn write_temp_archive(bytes: &[u8]) -> Result<String, Fs25Error> {
+pub fn new_download_archive() -> Result<String, Fs25Error> {
     let dir = std::env::temp_dir();
     std::fs::create_dir_all(&dir).map_err(|err| Fs25Error::Inaccessible {
         path: dir.to_string_lossy().into_owned(),
         message: err.to_string(),
     })?;
     let archive = dir.join(format!("{DOWNLOAD_PREFIX}{}.zip", uuid::Uuid::new_v4()));
-    std::fs::write(&archive, bytes).map_err(|err| Fs25Error::Inaccessible {
+    File::create(&archive).map_err(|err| Fs25Error::Inaccessible {
         path: archive.to_string_lossy().into_owned(),
         message: err.to_string(),
     })?;
     Ok(archive.to_string_lossy().into_owned())
+}
+
+/// Append one fetched chunk to a staged download archive and return the total
+/// bytes staged so far. The caller owns the file and must remove it with
+/// [`cleanup_pack`] (or [`cleanup_pack`] on the partial file after a failure).
+///
+/// Only files created by [`new_download_archive`] are accepted: the frontend
+/// has no filesystem plugin, and this guard keeps it that way — no other path
+/// can be written through the streaming append.
+pub fn append_download_chunk(archive: &Path, chunk: &[u8]) -> Result<u64, Fs25Error> {
+    if !is_staged_download(archive) {
+        return Err(Fs25Error::Internal {
+            message: format!("not a staged download archive: {}", archive.display()),
+        });
+    }
+    let mut file = OpenOptions::new().append(true).open(archive).map_err(|err| {
+        Fs25Error::Inaccessible {
+            path: archive.to_string_lossy().into_owned(),
+            message: err.to_string(),
+        }
+    })?;
+    file.write_all(chunk).map_err(|err| Fs25Error::Inaccessible {
+        path: archive.to_string_lossy().into_owned(),
+        message: err.to_string(),
+    })?;
+    file.metadata()
+        .map(|meta| meta.len())
+        .map_err(|err| Fs25Error::Inaccessible {
+            path: archive.to_string_lossy().into_owned(),
+            message: err.to_string(),
+        })
+}
+
+/// True only for staged downloads this module created: a `{DOWNLOAD_PREFIX}`
+/// file directly under the system temp dir.
+fn is_staged_download(archive: &Path) -> bool {
+    let Some(name) = archive.file_name().and_then(|name| name.to_str()) else {
+        return false;
+    };
+    name.starts_with(DOWNLOAD_PREFIX) && archive.parent() == Some(std::env::temp_dir().as_path())
+}
+
+/// True for the temporary archives this module owns: packed (`fs25-pack-*`) or
+/// staged download (`fs25-download-*`) files. Transfers only accept these
+/// (ticket 85), so no other local file can reach storage.
+pub fn is_managed_archive(archive: &Path) -> bool {
+    let Some(name) = archive.file_name().and_then(|name| name.to_str()) else {
+        return false;
+    };
+    name.starts_with(TEMP_PREFIX) || name.starts_with(DOWNLOAD_PREFIX)
 }
 
 /// Extract a zip archive created by [`pack_save`] into `dest_dir`.
@@ -429,5 +478,55 @@ mod tests {
         );
 
         let _ = std::fs::remove_dir_all(&parent);
+    }
+
+    // --- Streamed download staging (ticket 85) -----------------------------
+
+    #[test]
+    fn download_staging_appends_chunks_in_order_and_reports_totals() {
+        let archive = PathBuf::from(new_download_archive().unwrap());
+        assert!(archive.exists(), "staging file created");
+        assert!(is_managed_archive(&archive));
+
+        assert_eq!(append_download_chunk(&archive, b"abc").unwrap(), 3);
+        assert_eq!(append_download_chunk(&archive, b"defgh").unwrap(), 8);
+        assert_eq!(append_download_chunk(&archive, b"").unwrap(), 8);
+        assert_eq!(std::fs::read(&archive).unwrap(), b"abcdefgh");
+
+        cleanup_pack(&archive).unwrap();
+        assert!(!archive.exists(), "staged archive removed");
+        cleanup_pack(&archive).unwrap(); // idempotent
+    }
+
+    #[test]
+    fn append_download_chunk_rejects_paths_outside_the_staging_convention() {
+        // A plain file in the temp dir is not ours to write.
+        let foreign = std::env::temp_dir().join(format!("not-ours-{}.txt", std::process::id()));
+        std::fs::write(&foreign, b"x").unwrap();
+        assert!(append_download_chunk(&foreign, b"data").is_err());
+        assert_eq!(std::fs::read(&foreign).unwrap(), b"x", "foreign file untouched");
+        let _ = std::fs::remove_file(&foreign);
+
+        // A prefixed name outside the temp dir is equally out of bounds.
+        let parent = fixture("staging-guard");
+        let elsewhere = parent.join("fs25-download-evil.zip");
+        std::fs::write(&elsewhere, b"").unwrap();
+        assert!(append_download_chunk(&elsewhere, b"data").is_err());
+        assert_eq!(std::fs::read(&elsewhere).unwrap(), b"", "foreign file untouched");
+
+        // A missing staging file is a plain IO failure, not a write target.
+        let missing = std::env::temp_dir().join("fs25-download-missing.zip");
+        assert!(append_download_chunk(&missing, b"data").is_err());
+
+        let _ = std::fs::remove_dir_all(&parent);
+    }
+
+    #[test]
+    fn managed_archive_guard_covers_packed_and_staged_names_only() {
+        assert!(is_managed_archive(Path::new("/tmp/fs25-pack-1.zip")));
+        assert!(is_managed_archive(Path::new("/tmp/fs25-download-1.zip")));
+        assert!(!is_managed_archive(Path::new("/tmp/savegame1.zip")));
+        assert!(!is_managed_archive(Path::new("/home/ada/.ssh/id_rsa")));
+        assert!(!is_managed_archive(Path::new("/tmp/")));
     }
 }

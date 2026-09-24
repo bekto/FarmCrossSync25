@@ -1,8 +1,10 @@
 import { test } from "node:test";
 import assert from "node:assert/strict";
+import { ApiError, UnauthorizedError } from "./api.ts";
 import {
   buildFarmView,
   createFarmScreen,
+  httpFarmApi,
   type FarmDetail,
   type FarmScreenDeps,
   type Member,
@@ -209,3 +211,70 @@ function makeDeps(overrides: Partial<FarmScreenDeps> = {}): FarmScreenDeps {
     ...overrides,
   };
 }
+
+// --- Production data access through the shared client (ticket 76) ----------
+
+function jsonFetch(
+  body: unknown,
+  status: number,
+  calls: Array<{ url: string; init: RequestInit }> = [],
+): typeof fetch {
+  return (async (url: unknown, init?: RequestInit) => {
+    calls.push({ url: String(url), init: init ?? {} });
+    return new Response(JSON.stringify(body), {
+      status,
+      headers: { "Content-Type": "application/json" },
+    });
+  }) as typeof fetch;
+}
+
+test("httpFarmApi reads the envelope with the session token attached", async () => {
+  const calls: Array<{ url: string; init: RequestInit }> = [];
+  const api = httpFarmApi(
+    "https://api.test",
+    async () => "tok-1",
+    jsonFetch({ saves: SAVES }, 200, calls),
+  );
+
+  const saves = await api.fetchSaves("f1");
+
+  assert.deepEqual(saves, SAVES);
+  assert.equal(calls[0].url, "https://api.test/farms/f1/saves");
+  const headers = calls[0].init.headers as Record<string, string>;
+  assert.equal(headers.Authorization, "Bearer tok-1");
+});
+
+test("httpFarmApi surfaces ApiError with the HTTP status and server error string", async () => {
+  const api = httpFarmApi(
+    "https://api.test",
+    async () => "tok-1",
+    jsonFetch({ error: "farm not found" }, 404),
+  );
+
+  await assert.rejects(
+    () => api.fetchFarm("nope"),
+    (err: unknown) => {
+      assert.ok(err instanceof ApiError);
+      assert.equal(err.status, 404);
+      assert.equal(err.code, "farm not found");
+      assert.equal(err.message, "farm not found");
+      return true;
+    },
+  );
+});
+
+test("httpFarmApi surfaces 401 as UnauthorizedError and invokes the recovery hook", async () => {
+  const seen: UnauthorizedError[] = [];
+  const api = httpFarmApi(
+    "https://api.test",
+    async () => "stale",
+    jsonFetch({ error: "unauthorized" }, 401),
+    (error) => {
+      seen.push(error);
+    },
+  );
+
+  await assert.rejects(() => api.fetchMembers("f1"), UnauthorizedError);
+  assert.equal(seen.length, 1);
+  assert.equal(seen[0].status, 401);
+});

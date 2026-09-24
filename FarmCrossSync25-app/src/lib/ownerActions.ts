@@ -12,6 +12,12 @@
 // is derived from the member `role` for that user, falling back to the farm's
 // `owner_id`. When ownership is false no owner-only dep is ever called.
 
+import {
+  createApiClient,
+  type HttpMethod,
+  type OnUnauthorized,
+} from "./api.ts";
+
 export interface Invite {
   id: string;
   farm_id?: string;
@@ -193,8 +199,9 @@ export function createOwnerActions(deps: OwnerActionDeps): OwnerActions {
 }
 
 // --- Production data access ------------------------------------------------
-// The typed API client is ticket 40; these call the endpoints directly with the
-// session token and are injected so tests use fakes.
+// All calls route through the shared API client (ticket 76): one place builds
+// the bearer header, and failures surface as `ApiError` carrying the HTTP
+// status and the server error string (`{ "error": "<code>" }`).
 
 export interface OwnerApi {
   fetchInvites(farmId: string): Promise<Invite[]>;
@@ -210,24 +217,16 @@ export function httpOwnerApi(
   baseUrl: string,
   getToken: () => Promise<string | null>,
   fetchImpl: typeof fetch = fetch,
+  onUnauthorized?: OnUnauthorized,
 ): OwnerApi {
+  const client = createApiClient({ baseUrl, getToken, fetchImpl, onUnauthorized });
+
   async function request(
-    method: string,
+    method: HttpMethod,
     path: string,
     body?: unknown,
   ): Promise<Record<string, unknown>> {
-    const token = await getToken();
-    const res = await fetchImpl(`${baseUrl}${path}`, {
-      method,
-      headers: {
-        ...(body === undefined ? {} : { "Content-Type": "application/json" }),
-        ...(token ? { Authorization: `Bearer ${token}` } : {}),
-      },
-      body: body === undefined ? undefined : JSON.stringify(body),
-    });
-    if (!res.ok) throw new Error(`request failed: ${res.status}`);
-    if (res.status === 204) return {};
-    return (await res.json()) as Record<string, unknown>;
+    return (await client.request<Record<string, unknown>>(path, { method, body })) ?? {};
   }
 
   return {

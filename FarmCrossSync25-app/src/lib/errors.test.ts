@@ -102,7 +102,7 @@ test("friendlyErrorMessage maps known situations and keeps service copy", () => 
     ERROR_MESSAGES["no-internet"],
   );
   assert.equal(
-    friendlyErrorMessage("request failed: 404"),
+    friendlyErrorMessage("farm not found"),
     ERROR_MESSAGES["farm-not-found"],
   );
   const serviceCopy = `Upload failed: boom. ${LOCAL_SAVE_SAFE_MESSAGE}`;

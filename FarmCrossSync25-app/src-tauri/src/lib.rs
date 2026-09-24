@@ -10,7 +10,6 @@ fn greet(name: &str) -> String {
 #[cfg_attr(mobile, tauri::mobile_entry_point)]
 pub fn run() {
     tauri::Builder::default()
-        .plugin(tauri_plugin_opener::init())
         .plugin(tauri_plugin_dialog::init())
         .invoke_handler(tauri::generate_handler![
             greet,
@@ -22,7 +21,9 @@ pub fn run() {
             fs25::contract::replace_save,
             fs25::contract::pack_save,
             fs25::contract::cleanup_pack,
-            fs25::contract::write_temp_archive,
+            fs25::contract::open_temp_archive,
+            fs25::contract::append_temp_archive,
+            fs25::contract::put_archive_file,
             fs25::contract::unpack_save,
             fs25::contract::cleanup_unpack,
             fs25::contract::read_sync_state,

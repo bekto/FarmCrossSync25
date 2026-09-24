@@ -11,6 +11,10 @@
 // The active-farm selection lives in uiState.ts; this module receives the id
 // and reloads farm detail/members/saves, restarting the poll for the new farm.
 
+import {
+  createApiClient,
+  type OnUnauthorized,
+} from "./api.ts";
 import { describeError } from "./errors.ts";
 import { createPoll, type PollScheduler } from "./poll.ts";
 
@@ -327,8 +331,9 @@ export function createFarmScreen(
 }
 
 // --- Production data access ------------------------------------------------
-// The typed API client is ticket 40; these call the endpoints directly with the
-// session token and are injected so tests use fakes.
+// All calls route through the shared API client (ticket 76): one place builds
+// the bearer header, and failures surface as `ApiError` carrying the HTTP
+// status and the server error string (`{ "error": "<code>" }`).
 
 export interface FarmApi {
   fetchFarm(farmId: string): Promise<FarmDetail>;
@@ -340,14 +345,12 @@ export function httpFarmApi(
   baseUrl: string,
   getToken: () => Promise<string | null>,
   fetchImpl: typeof fetch = fetch,
+  onUnauthorized?: OnUnauthorized,
 ): FarmApi {
+  const client = createApiClient({ baseUrl, getToken, fetchImpl, onUnauthorized });
+
   async function get(path: string): Promise<Record<string, unknown>> {
-    const token = await getToken();
-    const res = await fetchImpl(`${baseUrl}${path}`, {
-      headers: token ? { Authorization: `Bearer ${token}` } : {},
-    });
-    if (!res.ok) throw new Error(`request failed: ${res.status}`);
-    return (await res.json()) as Record<string, unknown>;
+    return (await client.get<Record<string, unknown>>(path)) ?? {};
   }
 
   return {

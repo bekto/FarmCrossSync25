@@ -9,6 +9,12 @@
 // All dependencies are injected so the state machine is DOM-, Tauri-, and
 // network-free and can run under `node --test`.
 
+import {
+  createApiClient,
+  UnauthorizedError,
+  type OnUnauthorized,
+} from "./api.ts";
+
 export type SessionState =
   | "unregistered"
   | "awaitingName"
@@ -39,6 +45,13 @@ export interface Session {
   readonly isRegistered: boolean;
   runCloudAction<T>(action: () => Promise<T>): Promise<T | undefined>;
   submitDisplayName(name: string): Promise<boolean>;
+  /**
+   * 401 recovery: drop the cached token and return to the registration prompt.
+   * The deferred cloud action (if any) stays queued and resumes after a
+   * successful re-registration. Production also clears the stored token via
+   * `clear_session_token` before calling this (ticket 76).
+   */
+  handleUnauthorized(): void;
 }
 
 export function createSession(deps: SessionDeps): Session {
@@ -52,12 +65,31 @@ export function createSession(deps: SessionDeps): Session {
     return token;
   }
 
+  function handleUnauthorized(): void {
+    // Null (not undefined) on purpose: the token is known-rejected, so it must
+    // never be re-served from the cache even if the store clear failed.
+    token = null;
+    error = null;
+    state = "awaitingName";
+    deps.onRequireDisplayName();
+  }
+
   async function runCloudAction<T>(
     action: () => Promise<T>,
   ): Promise<T | undefined> {
     if (await ensureToken()) {
       state = "registered";
-      return action();
+      try {
+        return await action();
+      } catch (cause) {
+        if (!(cause instanceof UnauthorizedError)) throw cause;
+        // The token expired or was revoked mid-action: re-queue the action so
+        // it resumes after re-registration, and return to the prompt. The
+        // onUnauthorized hook has already cleared the stored token.
+        pending = action as () => Promise<unknown>;
+        handleUnauthorized();
+        return undefined;
+      }
     }
     pending = action as () => Promise<unknown>;
     error = null;
@@ -107,24 +139,27 @@ export function createSession(deps: SessionDeps): Session {
     },
     runCloudAction,
     submitDisplayName,
+    handleUnauthorized,
   };
 }
 
-// Production register dependency: POST ${baseUrl}/register. The API client is a
-// later ticket; this is the minimum wiring the deferral gate needs.
+// Production register dependency: POST ${baseUrl}/register through the shared
+// API client (ticket 76). It is a public call (`auth: false`, no token) and
+// surfaces `ApiError` with the HTTP status and the server error string like
+// every other production service; a 401 invokes the injected recovery hook.
 export function httpRegister(
   baseUrl: string,
   fetchImpl: typeof fetch = fetch,
+  onUnauthorized?: OnUnauthorized,
 ): RegisterFn {
+  const client = createApiClient({ baseUrl, fetchImpl, onUnauthorized });
   return async (installationId, displayName) => {
-    const res = await fetchImpl(`${baseUrl}/register`, {
-      method: "POST",
-      headers: { "Content-Type": "application/json" },
-      body: JSON.stringify({ installationId, displayName }),
-    });
-    if (!res.ok) throw new Error(`register failed: ${res.status}`);
-    const body = (await res.json()) as { token?: string };
-    if (!body.token) throw new Error("register response missing token");
+    const body = await client.post<{ token?: string }>(
+      "/register",
+      { installationId, displayName },
+      { auth: false },
+    );
+    if (!body?.token) throw new Error("register response missing token");
     return { token: body.token };
   };
 }

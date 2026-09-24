@@ -8,9 +8,10 @@
 //
 // Drives the real client code paths — `runUpload`, `createApiClient`, and
 // `createPutToR2` — against the local Worker/D1/R2. Only the Tauri filesystem
-// commands validate/read-metadata/pack/hash/sync-state are faked, exactly as in
-// `upload-e2e.mjs`. Local save recoverability is asserted by keeping the real
-// cloud metadata row and R2 object intact across each failure.
+// commands validate/read-metadata/pack/hash/sync-state and the file-based byte
+// transport (`putArchive`, streamed from disk in production) are faked, exactly
+// as in `upload-e2e.mjs`. Local save recoverability is asserted by keeping the
+// real cloud metadata row and R2 object intact across each failure.
 //
 // Usage: node scripts/reliability-e2e.mjs   (starts and stops its own Worker)
 // Requires: backend deps installed; ENABLE_R2_TEST is set by this script.
@@ -19,13 +20,13 @@ import { spawn, spawnSync } from "node:child_process";
 import { createHash } from "node:crypto";
 import {
   closeSync,
+  createReadStream,
   mkdtempSync,
   openSync,
   rmSync,
   statSync,
   writeFileSync,
 } from "node:fs";
-import { readFile } from "node:fs/promises";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { fileURLToPath } from "node:url";
@@ -33,6 +34,18 @@ import { fileURLToPath } from "node:url";
 import { createApiClient } from "../src/lib/api.ts";
 import { runUpload, LOCAL_SAVE_SAFE_MESSAGE } from "../src/lib/upload.ts";
 import { createPutToR2 } from "../src/lib/uploadTransport.ts";
+
+// File-based streaming PUT: production streams the archive from disk in Rust;
+// node streams it the same way here so the body never materializes in memory.
+async function putArchive({ url, method, headers, archivePath }) {
+  const res = await fetch(url, {
+    method,
+    headers,
+    body: createReadStream(archivePath),
+    duplex: "half",
+  });
+  return res.status;
+}
 
 const BACKEND_DIR = fileURLToPath(
   new URL("../../FarmCrossSync25-backend", import.meta.url),
@@ -208,7 +221,7 @@ async function main() {
     const B = await register("Member B", `rel-member-${stamp}`);
     const putToR2 = createPutToR2({
       baseUrl: BASE,
-      readFile: async (path) => new Uint8Array(await readFile(path)),
+      putArchive,
     });
 
     const { farm } = await A.client.post("/farms", { name: "Reliability Farm" });

@@ -54,6 +54,9 @@ export class UnauthorizedError extends ApiError {
   }
 }
 
+/** Recovery hook invoked before a 401 is thrown (production wires the session). */
+export type OnUnauthorized = (error: UnauthorizedError) => void | Promise<void>;
+
 export interface ApiClient {
   readonly baseUrl: string;
   request<T>(path: string, options?: RequestOptions): Promise<T>;
@@ -70,7 +73,7 @@ export interface ApiClientOptions {
   getToken?: () => Promise<string | null>;
   fetchImpl?: typeof fetch;
   /** Invoked before a 401 is thrown, so the session layer can recover. */
-  onUnauthorized?: (error: UnauthorizedError) => void | Promise<void>;
+  onUnauthorized?: OnUnauthorized;
 }
 
 interface ErrorBody {

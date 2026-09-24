@@ -15,7 +15,9 @@
 //! | `replace_save`     | `targetPath: string`, `stagedPath: string`, `expectedHash?: string` | `ReplaceResult` |
 //! | `pack_save`        | `savePath: string`, `outDir?: string`              | `PackResult`       |
 //! | `cleanup_pack`     | `archivePath: string`                              | `()`               |
-//! | `write_temp_archive` | `contents: number[]`                             | `string`           |
+//! | `open_temp_archive` | none                                              | `string` (temp path) |
+//! | `append_temp_archive` | raw chunk body + `x-archive-path` header        | `number` (bytes staged so far) |
+//! | `put_archive_file` | `archivePath: string`, `url: string`, `method: string`, `headers?: Record<string, string>` | `number` (response status) |
 //! | `unpack_save`      | `archivePath: string`, `destDir?: string`          | `UnpackResult`     |
 //! | `cleanup_unpack`   | `destPath: string`                                 | `()`               |
 //! | `read_sync_state`  | `farmId: string`                                   | `SyncState \| null` |
@@ -479,16 +481,65 @@ pub fn cleanup_pack(archive_path: String) -> Result<(), Fs25Error> {
     crate::fs25::pack::cleanup_pack(std::path::Path::new(&archive_path))
 }
 
-/// Persist downloaded archive bytes to a fresh temporary file and return its
-/// path, ready for [`unpack_save`]. The frontend has no filesystem plugin, so
-/// the download transport stages the fetched bytes through this scoped command.
-///
-/// ponytail: `contents` arrives as a JSON number array; fine for typical
-/// savegame archives. If multi-100 MB downloads make IPC the bottleneck, switch
-/// to Tauri's raw IPC (`tauri::ipc::Request`) rather than changing callers.
+/// Header carrying the staged archive path on raw `append_temp_archive`
+/// chunks (the chunk itself is the raw IPC body).
+pub const ARCHIVE_PATH_HEADER: &str = "x-archive-path";
+
+/// Create a fresh temporary archive for streamed download writes and return
+/// its path, ready for [`unpack_save`]. The download transport appends the
+/// bytes fetched from storage chunk by chunk with [`append_temp_archive`], so
+/// the archive never exists in memory; remove it with [`cleanup_pack`].
 #[tauri::command]
-pub fn write_temp_archive(contents: Vec<u8>) -> Result<String, Fs25Error> {
-    crate::fs25::pack::write_temp_archive(&contents)
+pub fn open_temp_archive() -> Result<String, Fs25Error> {
+    crate::fs25::pack::new_download_archive()
+}
+
+/// Append one raw chunk of a downloading archive to its staged temp file and
+/// resolve with the total bytes staged so far.
+///
+/// Raw IPC (ticket 85): the chunk arrives as a binary request body
+/// (`tauri::ipc::Request`), never as a JSON number array, and the staged file
+/// path travels in the `x-archive-path` request header. Webview memory is one
+/// chunk per call regardless of archive size. Only files created by
+/// [`open_temp_archive`] can be appended to.
+#[tauri::command]
+pub fn append_temp_archive(request: tauri::ipc::Request) -> Result<u64, Fs25Error> {
+    let path = request
+        .headers()
+        .get(ARCHIVE_PATH_HEADER)
+        .and_then(|value| value.to_str().ok())
+        .ok_or_else(|| Fs25Error::Internal {
+            message: format!("missing {ARCHIVE_PATH_HEADER} header"),
+        })?;
+    let chunk = match request.body() {
+        tauri::ipc::InvokeBody::Raw(bytes) => bytes.as_slice(),
+        tauri::ipc::InvokeBody::Json(_) => {
+            return Err(Fs25Error::Internal {
+                message: "append_temp_archive expects a raw byte chunk".into(),
+            });
+        }
+    };
+    crate::fs25::pack::append_download_chunk(std::path::Path::new(path), chunk)
+}
+
+/// Stream a packed archive file to its storage target and resolve the response
+/// status (ticket 85). The body is read from disk by this process through
+/// bounded buffers — the webview only passes the path and target, so archive
+/// bytes never load into it. Only archives packed or staged by this module can
+/// be sent; non-2xx statuses resolve as data for the caller's error copy.
+#[tauri::command]
+pub fn put_archive_file(
+    archive_path: String,
+    url: String,
+    method: String,
+    headers: Option<std::collections::HashMap<String, String>>,
+) -> Result<u16, Fs25Error> {
+    crate::fs25::transfer::put_archive(
+        std::path::Path::new(&archive_path),
+        &url,
+        &method,
+        &headers.unwrap_or_default(),
+    )
 }
 
 /// Extract a save archive into a staging directory for verification and replace.

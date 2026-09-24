@@ -4,10 +4,12 @@
 // Drives the real client code path — `runDownload` + `createApiClient` +
 // `createGetToDisk` — against the local Worker/D1/R2. Only the Tauri filesystem
 // commands (validate/metadata/pack/hash/unpack/install/backup/sync-state) are
-// faked, because they cannot run outside the desktop app; the network, auth,
-// transport, and orchestration are the production modules. The fake filesystem
-// keeps real directories in a temp dir, so "unchanged/recoverable" assertions
-// are checked byte-for-byte.
+// faked, because they cannot run outside the desktop app; the byte staging and
+// upload seams (`openArchive`/`appendArchive`/`removeArchive`, `putArchive`)
+// are the node file/stream equivalents of the production Rust commands. The
+// network, auth, transport, and orchestration are the production modules. The
+// fake filesystem keeps real directories in a temp dir, so
+// "unchanged/recoverable" assertions are checked byte-for-byte.
 //
 // What it checks:
 //   1. A (owner) uploads; B (member) downloads it. After confirm ->
@@ -18,6 +20,8 @@
 //      the previous local save — the single backup the replacement creates.
 //   4. Fetch, unpack, and install failures each leave B's original save
 //      unchanged and write no sync state.
+//   5. A large mock archive streams to the staged temp file without growing
+//      process memory with the archive (ticket 85).
 //
 // Usage: node scripts/download-e2e.mjs   (starts and stops its own Worker)
 // Requires: backend deps installed; ENABLE_R2_TEST and FARM_CROSSSYNC_LOCAL_DEV
@@ -26,8 +30,10 @@
 import { spawn, spawnSync } from "node:child_process";
 import { createHash } from "node:crypto";
 import {
+  appendFileSync,
   closeSync,
   cpSync,
+  createReadStream,
   existsSync,
   mkdirSync,
   mkdtempSync,
@@ -35,6 +41,7 @@ import {
   readdirSync,
   readFileSync,
   rmSync,
+  statSync,
   writeFileSync,
 } from "node:fs";
 import { tmpdir } from "node:os";
@@ -46,6 +53,18 @@ import { createGetToDisk } from "../src/lib/downloadTransport.ts";
 import { runDownload } from "../src/lib/download.ts";
 import { runUpload } from "../src/lib/upload.ts";
 import { createPutToR2 } from "../src/lib/uploadTransport.ts";
+
+// File-based streaming PUT: production streams the archive from disk in Rust;
+// node streams it the same way here so the body never materializes in memory.
+async function putArchive({ url, method, headers, archivePath }) {
+  const res = await fetch(url, {
+    method,
+    headers,
+    body: createReadStream(archivePath),
+    duplex: "half",
+  });
+  return res.status;
+}
 
 const BACKEND_DIR = fileURLToPath(
   new URL("../../FarmCrossSync25-backend", import.meta.url),
@@ -245,10 +264,23 @@ function makeLocalFs({ overrides = {} }) {
   return { deps, uploadDeps, calls, syncWrites, getSyncState: () => syncState };
 }
 
-function stageArchive(bytes) {
-  const path = join(mkdtempSync(join(tmpdir(), "download-stage-")), "save.zip");
-  writeFileSync(path, bytes);
-  return Promise.resolve(path);
+// Streamed staging seam (production: the `openTempArchive`/`appendTempArchive`
+// raw-IPC commands + `cleanupPack`): chunks are appended straight to the temp
+// file, mirroring the bounded-memory byte path.
+function stagingFns() {
+  return {
+    openArchive: async () => {
+      const path = join(mkdtempSync(join(tmpdir(), "download-stage-")), "save.zip");
+      writeFileSync(path, "");
+      return path;
+    },
+    appendArchive: async (path, chunk) => {
+      appendFileSync(path, chunk);
+    },
+    removeArchive: async (path) => {
+      rmSync(path, { force: true });
+    },
+  };
 }
 
 // Tamper with a fetched archive while keeping it a valid serialized save: flip
@@ -383,7 +415,7 @@ async function main() {
     // --- A uploads through the real upload flow + R2 transport ------------
     const putToR2 = createPutToR2({
       baseUrl: BASE,
-      readFile: async (path) => new Uint8Array(readFileSync(path)),
+      putArchive,
     });
     const aFs = makeLocalFs({});
     const uploadResult = await runUpload(
@@ -410,7 +442,7 @@ async function main() {
 
     // --- Criterion 1: B downloads A's save and it replaces B's local save --
     const bFs = makeLocalFs({});
-    const getToDisk = createGetToDisk({ baseUrl: BASE, stageArchive });
+    const getToDisk = createGetToDisk({ baseUrl: BASE, ...stagingFns() });
     const phases = [];
     const download = await runDownload(
       {
@@ -479,7 +511,7 @@ async function main() {
         tamperFs,
         createGetToDisk({
           baseUrl: BASE,
-          stageArchive,
+          ...stagingFns(),
           fetchImpl: tamperingFetch(flipByte),
         }),
       ),
@@ -538,7 +570,7 @@ async function main() {
       "fetch failure",
       createGetToDisk({
         baseUrl: BASE,
-        stageArchive,
+        ...stagingFns(),
         fetchImpl: async () => new Response("nope", { status: 500 }),
       }),
     );
@@ -552,6 +584,68 @@ async function main() {
         throw new Error("swap failed");
       },
     });
+
+    // --- Criterion 5: a large mock archive streams with bounded memory -----
+    // 220 MB (above the 200 MB warning threshold) generated chunk by chunk —
+    // never materialized on either side — must land staged in full while the
+    // client heap stays bounded (ticket 85).
+    {
+      const LARGE_BYTES = 220 * 1024 * 1024;
+      const bigBody = (totalBytes) => {
+        let sent = 0;
+        return new ReadableStream({
+          pull(controller) {
+            if (sent >= totalBytes) {
+              controller.close();
+              return;
+            }
+            const n = Math.min(256 * 1024, totalBytes - sent);
+            sent += n;
+            controller.enqueue(new Uint8Array(n));
+          },
+        });
+      };
+      const stage = stagingFns();
+      let stagedBytes = 0;
+      const largeGet = createGetToDisk({
+        baseUrl: BASE,
+        openArchive: stage.openArchive,
+        removeArchive: stage.removeArchive,
+        appendArchive: async (path, chunk) => {
+          stagedBytes += chunk.length;
+          await stage.appendArchive(path, chunk);
+        },
+        fetchImpl: async () => new Response(bigBody(LARGE_BYTES)),
+      });
+
+      const heapBefore = process.memoryUsage().heapUsed;
+      let heapPeak = heapBefore;
+      const sampler = setInterval(() => {
+        heapPeak = Math.max(heapPeak, process.memoryUsage().heapUsed);
+      }, 20);
+      const { archivePath } = await largeGet({
+        objectKey: "mock/large-save",
+        presigned: true,
+        url: "https://r2.example/mock/large-save",
+        method: "GET",
+        headers: {},
+        expiresAt: new Date(Date.now() + 60_000).toISOString(),
+      });
+      clearInterval(sampler);
+
+      check(
+        "large archive: the whole mock archive staged to the temp file",
+        stagedBytes === LARGE_BYTES && statSync(archivePath).size === LARGE_BYTES,
+        `staged ${stagedBytes} of ${LARGE_BYTES}`,
+      );
+      const growth = heapPeak - heapBefore;
+      check(
+        "large archive: process memory stays bounded while staging",
+        growth < LARGE_BYTES / 4,
+        `heap grew ${growth} bytes moving ${LARGE_BYTES} bytes`,
+      );
+      rmSync(archivePath, { force: true });
+    }
 
     console.log(`\n${passed} passed, ${failed} failed`);
     if (failed > 0) process.exitCode = 1;

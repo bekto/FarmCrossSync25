@@ -159,12 +159,49 @@ export function cleanupPack(archivePath: string): Promise<void> {
 }
 
 /**
- * Persist downloaded archive bytes to a fresh temp file and resolve its path.
- * The download transport stages fetched bytes through this scoped command; the
- * caller removes the file with `cleanupPack`.
+ * Create a fresh temporary archive for streamed writes and resolve its path.
+ * The download transfer appends bytes chunk by chunk with `appendTempArchive`
+ * (raw IPC — a binary payload, never a JSON number array); the caller removes
+ * the file with `cleanupPack`.
  */
-export function writeTempArchive(contents: Uint8Array): Promise<string> {
-  return invoke("write_temp_archive", { contents: Array.from(contents) });
+export function openTempArchive(): Promise<string> {
+  return invoke("open_temp_archive");
+}
+
+/**
+ * Append one raw chunk to a staged temporary archive and resolve the total
+ * bytes staged so far. The chunk travels as a binary payload and the staged
+ * path in the `X-Archive-Path` header, so per-call memory never scales with
+ * the archive size.
+ */
+export function appendTempArchive(
+  archivePath: string,
+  chunk: Uint8Array,
+): Promise<number> {
+  return invoke("append_temp_archive", chunk, {
+    headers: { "X-Archive-Path": archivePath },
+  });
+}
+
+/**
+ * Stream a packed archive file to its storage target (file-based transfer) and
+ * resolve the response status. The body is read from disk by the backend
+ * process through bounded buffers; the UI only passes the path and target, so
+ * archive bytes never load into it. Only archives produced by `packSave` can
+ * be sent.
+ */
+export function putArchiveFile(
+  archivePath: string,
+  url: string,
+  method: string,
+  headers?: Record<string, string>,
+): Promise<number> {
+  return invoke("put_archive_file", {
+    archivePath,
+    url,
+    method,
+    headers: headers ?? null,
+  });
 }
 
 export function unpackSave(

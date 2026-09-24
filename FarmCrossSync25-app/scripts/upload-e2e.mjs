@@ -4,8 +4,10 @@
 // Drives the real client code path — `runUpload` + `createApiClient` +
 // `createPutToR2` — against the local Worker/D1/R2. Only the Tauri filesystem
 // commands (validate/metadata/pack/hash/sync-state) are faked, because they
-// cannot run outside the desktop app; the network, auth, transport, and
-// orchestration are the production modules.
+// cannot run outside the desktop app, and `putArchive` — the file-based byte
+// transport, streamed from disk in production by Rust — is a node stream here.
+// The network, auth, target selection, error mapping, and orchestration are
+// the production modules.
 //
 // What it checks:
 //   1. A uploads; member B sees the published save via GET /farms/:id/saves.
@@ -13,14 +15,25 @@
 //   3. An interrupted upload (PUT fails) leaves the previous cloud metadata
 //      authoritative.
 //   4. A happy path writes local sync state with the uploaded hash/time.
+//   5. A mock archive larger than the size-warning threshold streams through
+//      the transport without growing process memory with the archive (85).
 //
 // Usage: node scripts/upload-e2e.mjs   (starts and stops its own Worker)
 // Requires: backend deps installed; ENABLE_R2_TEST is set by this script.
 
 import { spawn, spawnSync } from "node:child_process";
 import { createHash } from "node:crypto";
-import { openSync, closeSync, mkdtempSync, statSync, writeFileSync, rmSync } from "node:fs";
-import { readFile } from "node:fs/promises";
+import {
+  closeSync,
+  createReadStream,
+  ftruncateSync,
+  mkdtempSync,
+  openSync,
+  statSync,
+  writeFileSync,
+  rmSync,
+} from "node:fs";
+import http from "node:http";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { fileURLToPath } from "node:url";
@@ -28,6 +41,19 @@ import { fileURLToPath } from "node:url";
 import { createApiClient } from "../src/lib/api.ts";
 import { runUpload } from "../src/lib/upload.ts";
 import { createPutToR2 } from "../src/lib/uploadTransport.ts";
+
+// File-based streaming PUT: the production `putArchiveFile` command streams the
+// archive from disk in bounded buffers; node streams it the same way here so
+// the transport never materializes the body in this process.
+async function putArchive({ url, method, headers, archivePath }) {
+  const res = await fetch(url, {
+    method,
+    headers,
+    body: createReadStream(archivePath),
+    duplex: "half",
+  });
+  return res.status;
+}
 
 const BACKEND_DIR = fileURLToPath(
   new URL("../../FarmCrossSync25-backend", import.meta.url),
@@ -194,7 +220,7 @@ async function main() {
 
     const putToR2 = createPutToR2({
       baseUrl: BASE,
-      readFile: async (path) => new Uint8Array(await readFile(path)),
+      putArchive,
     });
 
     // --- Happy-path upload as A -------------------------------------------
@@ -296,6 +322,95 @@ async function main() {
     );
     const after = JSON.stringify((await clientB.get(`/farms/${farm.id}/saves`)).saves);
     check("previous cloud save metadata unchanged after interruption", before === after);
+
+    // --- Criterion 5: a large mock archive streams with bounded memory -----
+    // A save above the 200 MB size-warning threshold flows through the real
+    // `runUpload` + `createPutToR2` into a local sink: the warning must prompt,
+    // both phases must progress, and the client heap must not grow with the
+    // archive (ticket 85).
+    {
+      const LARGE_BYTES = 220 * 1024 * 1024;
+      const bigPath = join(workDir, "large-save.zip");
+      const fd = openSync(bigPath, "w");
+      ftruncateSync(fd, LARGE_BYTES); // sparse mock archive
+      closeSync(fd);
+      const bigHash = sha256(Buffer.from("large-mock-save"));
+
+      let sinkBytes = 0;
+      const sink = http.createServer((req, res) => {
+        req.on("data", (chunk) => {
+          sinkBytes += chunk.length;
+        });
+        req.on("end", () => {
+          res.statusCode = 200;
+          res.end();
+        });
+      });
+      await new Promise((resolve) => sink.listen(0, "127.0.0.1", resolve));
+      const sinkUrl = `http://127.0.0.1:${sink.address().port}/sink`;
+
+      let sizeWarnings = 0;
+      const largePhases = [];
+      const large = localDeps({
+        archivePath: bigPath,
+        savePath,
+        hash: bigHash,
+        onSyncState: () => {},
+      });
+      const heapBefore = process.memoryUsage().heapUsed;
+      let heapPeak = heapBefore;
+      const sampler = setInterval(() => {
+        heapPeak = Math.max(heapPeak, process.memoryUsage().heapUsed);
+      }, 20);
+      const largeResult = await runUpload(
+        { farmId: farm.id, savePath },
+        {
+          ...large.deps,
+          uploadAuthorize: async () => ({
+            objectKey: "mock/large-save",
+            presigned: true,
+            url: sinkUrl,
+            method: "PUT",
+            headers: {},
+            expiresAt: new Date(Date.now() + 60_000).toISOString(),
+          }),
+          putToR2: createPutToR2({ baseUrl: BASE, putArchive }),
+          uploadComplete: async () => ({ uploadedAt: new Date().toISOString() }),
+        },
+        {
+          onPhase: (phase) => largePhases.push(phase),
+          confirmSizeWarning: (sizeBytes) => {
+            sizeWarnings += 1;
+            return sizeBytes === LARGE_BYTES;
+          },
+        },
+      );
+      clearInterval(sampler);
+      await new Promise((resolve) => sink.close(resolve));
+
+      check(
+        "large archive: upload succeeds through the size-warning path",
+        largeResult.ok === true && sizeWarnings === 1,
+        JSON.stringify({ sizeWarnings, result: largeResult }),
+      );
+      check(
+        "large archive: zipping and uploading phases both progress",
+        largePhases.join(",") === "zipping,uploading",
+        largePhases.join(","),
+      );
+      check(
+        "large archive: the whole mock archive streamed to storage",
+        sinkBytes === LARGE_BYTES,
+        `sink received ${sinkBytes} of ${LARGE_BYTES}`,
+      );
+      const growth = heapPeak - heapBefore;
+      check(
+        "large archive: process memory stays bounded while streaming",
+        growth < LARGE_BYTES / 4,
+        `heap grew ${growth} bytes moving ${LARGE_BYTES} bytes`,
+      );
+      rmSync(bigPath, { force: true });
+    }
 
     console.log(`\n${passed} passed, ${failed} failed`);
     if (failed > 0) process.exitCode = 1;

@@ -1,7 +1,9 @@
 import { test } from "node:test";
 import assert from "node:assert/strict";
+import { ApiError, UnauthorizedError } from "./api.ts";
 import {
   createOwnerActions,
+  httpOwnerApi,
   ownerRowActions,
   viewerIsOwner,
   kickConfirmation,
@@ -173,4 +175,71 @@ test("non-owner loads no invites and cannot act", async () => {
   await owner.loadInvites("f1", false);
   assert.deepEqual(r.calls, [], "fetchInvites not called for a non-owner");
   assert.deepEqual(owner.snapshot().invites, []);
+});
+
+// --- Production data access through the shared client (ticket 76) ----------
+
+function jsonFetch(
+  body: unknown,
+  status: number,
+  calls: Array<{ url: string; init: RequestInit }> = [],
+): typeof fetch {
+  return (async (url: unknown, init?: RequestInit) => {
+    calls.push({ url: String(url), init: init ?? {} });
+    return new Response(JSON.stringify(body), {
+      status,
+      headers: { "Content-Type": "application/json" },
+    });
+  }) as typeof fetch;
+}
+
+test("httpOwnerApi attaches the session token and unwraps the envelope", async () => {
+  const calls: Array<{ url: string; init: RequestInit }> = [];
+  const api = httpOwnerApi(
+    "https://api.test",
+    async () => "tok-1",
+    jsonFetch({ invites: INVITES }, 200, calls),
+  );
+
+  const invites = await api.fetchInvites("f1");
+
+  assert.deepEqual(invites, INVITES);
+  assert.equal(calls[0].url, "https://api.test/farms/f1/invites");
+  const headers = calls[0].init.headers as Record<string, string>;
+  assert.equal(headers.Authorization, "Bearer tok-1");
+});
+
+test("httpOwnerApi surfaces ApiError with the HTTP status and server error string", async () => {
+  const api = httpOwnerApi(
+    "https://api.test",
+    async () => "tok-1",
+    jsonFetch({ error: "invite_not_pending" }, 409),
+  );
+
+  await assert.rejects(
+    () => api.denyInvite("i1"),
+    (err: unknown) => {
+      assert.ok(err instanceof ApiError);
+      assert.equal(err.status, 409);
+      assert.equal(err.code, "invite_not_pending");
+      assert.equal(err.message, "invite_not_pending");
+      return true;
+    },
+  );
+});
+
+test("httpOwnerApi surfaces 401 as UnauthorizedError and invokes the recovery hook", async () => {
+  const seen: UnauthorizedError[] = [];
+  const api = httpOwnerApi(
+    "https://api.test",
+    async () => "stale",
+    jsonFetch({ error: "unauthorized" }, 401),
+    (error) => {
+      seen.push(error);
+    },
+  );
+
+  await assert.rejects(() => api.fetchCurrentUserId(), UnauthorizedError);
+  assert.equal(seen.length, 1);
+  assert.equal(seen[0].status, 401);
 });

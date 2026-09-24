@@ -9,6 +9,10 @@
 // The active-farm selection lives in uiState.ts; this module only reports the
 // farm list and the newly created farm, and the shell makes it active.
 
+import {
+  createApiClient,
+  type OnUnauthorized,
+} from "./api.ts";
 import { describeError } from "./errors.ts";
 
 /** A farm as returned by `GET /farms` (list) and `POST /farms` (create). */
@@ -178,30 +182,24 @@ export function createFarmSetup(deps: FarmSetupDeps): FarmSetup {
 }
 
 // --- Production data access ------------------------------------------------
-// Direct fetch with the session token, matching `httpFarmApi`/`httpOwnerApi`;
-// injected at the shell so tests use fakes.
+// All calls route through the shared API client (ticket 76), matching
+// `httpFarmApi`/`httpOwnerApi`: failures surface as `ApiError` with the HTTP
+// status and the server error string.
 
 export function httpFarmSetupApi(
   baseUrl: string,
   getToken: () => Promise<string | null>,
   fetchImpl: typeof fetch = fetch,
+  onUnauthorized?: OnUnauthorized,
 ): FarmSetupApi {
+  const client = createApiClient({ baseUrl, getToken, fetchImpl, onUnauthorized });
+
   async function req<T>(
     path: string,
     method: "GET" | "POST",
     body?: unknown,
   ): Promise<T> {
-    const token = await getToken();
-    const headers: Record<string, string> = {};
-    if (token) headers.Authorization = `Bearer ${token}`;
-    if (body !== undefined) headers["Content-Type"] = "application/json";
-    const res = await fetchImpl(`${baseUrl}${path}`, {
-      method,
-      headers,
-      body: body === undefined ? undefined : JSON.stringify(body),
-    });
-    if (!res.ok) throw new Error(`request failed: ${res.status}`);
-    return (await res.json()) as T;
+    return await client.request<T>(path, { method, body });
   }
 
   return {

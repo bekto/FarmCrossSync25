@@ -1,5 +1,4 @@
 <script lang="ts">
-  import { convertFileSrc } from "@tauri-apps/api/core";
   import { onMount } from "svelte";
   import Icon from "$lib/components/Icon.svelte";
   import DisplayNamePrompt from "$lib/components/DisplayNamePrompt.svelte";
@@ -31,6 +30,7 @@
   import { runDownload } from "$lib/download";
   import { createGetToDisk } from "$lib/downloadTransport";
   import {
+    appendTempArchive,
     cleanupPack,
     cleanupUnpack,
     computeHash,
@@ -38,14 +38,15 @@
     listSlotBindings,
     listSlots,
     onPackProgress,
+    openTempArchive,
     packSave,
+    putArchiveFile,
     readMetadata,
     readSyncState,
     setFarmSlot,
     unpackSave,
     validateSave,
     writeSyncState,
-    writeTempArchive,
   } from "$lib/fs25";
   import { pickFolder } from "$lib/folderPicker";
   import {
@@ -54,6 +55,7 @@
   } from "$lib/farmScreen";
   import { createFarmSetup, httpFarmSetupApi } from "$lib/farmSetup";
   import {
+    clearSessionToken,
     getBackupLocation,
     getFs25Root,
     getIdentity,
@@ -114,11 +116,21 @@
   let promptOpen = $state(false);
   let nameError = $state<string | null>(null);
 
+  // Ticket 76: one recovery for every production service's 401 — drop the
+  // stored and cached session token and return to the registration prompt.
+  // The deferred cloud action survives the clear and resumes after a
+  // successful re-registration.
+  async function handleUnauthorized() {
+    await clearSessionToken();
+    session.handleUnauthorized();
+    nameError = null;
+  }
+
   const session = createSession({
     getToken: getSessionToken,
     storeToken: storeSessionToken,
     getInstallationId: async () => (await getIdentity()).installationId,
-    register: httpRegister(API_BASE_URL),
+    register: httpRegister(API_BASE_URL, fetch, handleUnauthorized),
     onRequireDisplayName: () => {
       status = session.state;
       promptOpen = true;
@@ -146,30 +158,26 @@
   const api = createApiClient({
     baseUrl: API_BASE_URL,
     getToken: getSessionToken,
+    onUnauthorized: handleUnauthorized,
   });
 
-  // The packed archive is a temp file; read it through Tauri's asset protocol
-  // (enabled in tauri.conf.json with a `$TEMP/**` scope) so the transport stays
-  // a plain `fetch` PUT.
-  async function readArchive(path: string): Promise<Uint8Array<ArrayBuffer>> {
-    const res = await fetch(convertFileSrc(path));
-    if (!res.ok) {
-      throw new Error(`Could not read the packed archive (${res.status}).`);
-    }
-    return new Uint8Array(await res.arrayBuffer());
-  }
-
+  // The packed archive is a temp file; `putArchiveFile` streams it to storage
+  // file-based (the backend reads it from disk in bounded buffers), so archive
+  // bytes never load into the webview and peak memory is archive-independent.
   const putToR2 = createPutToR2({
     baseUrl: API_BASE_URL,
-    readFile: readArchive,
+    putArchive: ({ url, method, headers, archivePath }) =>
+      putArchiveFile(archivePath, url, method, headers),
   });
 
-  // Downloaded archive bytes are staged to a temp file through the scoped
-  // `write_temp_archive` Rust command (the frontend has no filesystem plugin);
+  // Downloaded archive bytes are staged chunk by chunk to a temp file through
+  // the scoped raw-IPC Rust commands (the frontend has no filesystem plugin);
   // `unpackSave` then extracts that file.
   const getToDisk = createGetToDisk({
     baseUrl: API_BASE_URL,
-    stageArchive: writeTempArchive,
+    openArchive: openTempArchive,
+    appendArchive: appendTempArchive,
+    removeArchive: cleanupPack,
   });
 
   const uploadDeps = (): UploadDeps => ({
@@ -289,7 +297,7 @@
   }
 
   const farmScreen = createFarmScreen({
-    ...httpFarmApi(API_BASE_URL, getSessionToken),
+    ...httpFarmApi(API_BASE_URL, getSessionToken, fetch, handleUnauthorized),
     copyToClipboard: (text) => navigator.clipboard.writeText(text),
     runUpload: async ({ farmId, savePath }) => {
       uploadPhase = null;
@@ -453,7 +461,7 @@
     confirmRequest = null;
   }
 
-  const ownerApi = httpOwnerApi(API_BASE_URL, getSessionToken);
+  const ownerApi = httpOwnerApi(API_BASE_URL, getSessionToken, fetch, handleUnauthorized);
   const ownerActions = createOwnerActions({ ...ownerApi, confirm });
 
   // --- Settings (ticket 37) ------------------------------------------------
@@ -475,9 +483,10 @@
     pickFolder,
     getBackupLocation,
     setBackupLocation,
-    fetchFarm: (farmId) => httpFarmApi(API_BASE_URL, getSessionToken).fetchFarm(farmId),
+    fetchFarm: (farmId) =>
+      httpFarmApi(API_BASE_URL, getSessionToken, fetch, handleUnauthorized).fetchFarm(farmId),
     leaveFarm: async (farmId) => {
-      const api = httpOwnerApi(API_BASE_URL, getSessionToken);
+      const api = httpOwnerApi(API_BASE_URL, getSessionToken, fetch, handleUnauthorized);
       const userId = await api.fetchCurrentUserId();
       if (!userId) throw new Error("Could not resolve the signed-in player.");
       await api.kickMember(farmId, userId);
@@ -490,7 +499,7 @@
   // gate so the first cloud action registers the installation (ticket 17),
   // then the farm becomes active and the Farm screen loads it.
   const farmSetup = createFarmSetup({
-    api: httpFarmSetupApi(API_BASE_URL, getSessionToken),
+    api: httpFarmSetupApi(API_BASE_URL, getSessionToken, fetch, handleUnauthorized),
     setFarms: (list) => setFarms(list),
     setActiveFarm: (id) => selectFarm(id),
     bindSlot: async (id, slot) => {

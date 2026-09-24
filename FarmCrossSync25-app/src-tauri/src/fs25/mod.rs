@@ -9,4 +9,5 @@ pub mod pack;
 pub mod replace;
 pub mod slots;
 pub mod sync_state;
+pub mod transfer;
 pub mod validator;

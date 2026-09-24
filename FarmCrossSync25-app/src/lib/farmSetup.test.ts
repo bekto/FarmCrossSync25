@@ -1,7 +1,9 @@
 import { test } from "node:test";
 import assert from "node:assert/strict";
+import { ApiError, UnauthorizedError } from "./api.ts";
 import {
   createFarmSetup,
+  httpFarmSetupApi,
   type FarmSetupApi,
   type FarmSetupDeps,
 } from "./farmSetup.ts";
@@ -155,4 +157,79 @@ test("create surfaces a slot owned by another farm clearly", async () => {
     screen.snapshot().error,
     "Farm created, but the slot could not be linked (Slot 3 is already linked to another farm; choose a different slot). Choose it on the Farm screen.",
   );
+});
+
+// --- Production data access through the shared client (ticket 76) ----------
+
+function jsonFetch(
+  body: unknown,
+  status: number,
+  calls: Array<{ url: string; init: RequestInit }> = [],
+): typeof fetch {
+  return (async (url: unknown, init?: RequestInit) => {
+    calls.push({ url: String(url), init: init ?? {} });
+    return new Response(JSON.stringify(body), {
+      status,
+      headers: { "Content-Type": "application/json" },
+    });
+  }) as typeof fetch;
+}
+
+test("httpFarmSetupApi resolves the farm id through lookup, then joins with the token", async () => {
+  const calls: Array<{ url: string; init: RequestInit }> = [];
+  const fetchImpl = (async (url: unknown, init?: RequestInit) => {
+    calls.push({ url: String(url), init: init ?? {} });
+    const body = String(url).includes("/farms/lookup")
+      ? { farm: { id: "f9" } }
+      : {};
+    return new Response(JSON.stringify(body), {
+      status: 200,
+      headers: { "Content-Type": "application/json" },
+    });
+  }) as typeof fetch;
+  const api = httpFarmSetupApi("https://api.test", async () => "tok-1", fetchImpl);
+
+  const { farmId } = await api.joinFarm("CODE-1");
+
+  assert.equal(farmId, "f9");
+  assert.equal(calls[0].url, "https://api.test/farms/lookup?code=CODE-1");
+  assert.equal(calls[1].url, "https://api.test/farms/f9/join");
+  assert.equal(calls[1].init.method, "POST");
+  const headers = calls[1].init.headers as Record<string, string>;
+  assert.equal(headers.Authorization, "Bearer tok-1");
+});
+
+test("httpFarmSetupApi surfaces ApiError with the HTTP status and server error string", async () => {
+  const api = httpFarmSetupApi(
+    "https://api.test",
+    async () => "tok-1",
+    jsonFetch({ error: "farm not found" }, 404),
+  );
+
+  await assert.rejects(
+    () => api.joinFarm("NOPE"),
+    (err: unknown) => {
+      assert.ok(err instanceof ApiError);
+      assert.equal(err.status, 404);
+      assert.equal(err.code, "farm not found");
+      assert.equal(err.message, "farm not found");
+      return true;
+    },
+  );
+});
+
+test("httpFarmSetupApi surfaces 401 as UnauthorizedError and invokes the recovery hook", async () => {
+  const seen: UnauthorizedError[] = [];
+  const api = httpFarmSetupApi(
+    "https://api.test",
+    async () => "stale",
+    jsonFetch({ error: "unauthorized" }, 401),
+    (error) => {
+      seen.push(error);
+    },
+  );
+
+  await assert.rejects(() => api.listFarms(), UnauthorizedError);
+  assert.equal(seen.length, 1);
+  assert.equal(seen[0].status, 401);
 });

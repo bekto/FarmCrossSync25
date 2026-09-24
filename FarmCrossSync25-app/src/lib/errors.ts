@@ -119,7 +119,8 @@ export function isNetworkError(cause: unknown): boolean {
  */
 export function friendlyErrorMessage(message: string): string {
   if (isNetworkError(message)) return errorMessage("no-internet");
-  if (/request failed:\s*404\b|farm not found/i.test(message)) {
+  // The API client surfaces the server error string (`{ "error": "..." }`).
+  if (/farm not found/i.test(message)) {
     return errorMessage("farm-not-found");
   }
   return message;

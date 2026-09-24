@@ -4,7 +4,9 @@
 // Drives the real client code paths — `createApiClient`, `httpFarmApi`,
 // `httpOwnerApi`, `createFarmScreen`, `createOwnerActions`, `createSettings`,
 // and `createPutToR2` — against the local Worker/D1/R2, with two registered
-// users (A, B) exercising the whole farm lifecycle.
+// users (A, B) exercising the whole farm lifecycle. The file-based byte
+// transport (`putArchive`) is the node streaming seam; everything else runs
+// the production modules.
 //
 // What it checks:
 //   1. A creates a farm; B joins by code; A approves; both screens see each
@@ -25,9 +27,9 @@ import { spawn, spawnSync } from "node:child_process";
 import { createHash } from "node:crypto";
 import {
   closeSync,
+  createReadStream,
   mkdtempSync,
   openSync,
-  readFileSync,
   rmSync,
   writeFileSync,
 } from "node:fs";
@@ -40,6 +42,18 @@ import { createFarmScreen, httpFarmApi } from "../src/lib/farmScreen.ts";
 import { createOwnerActions, httpOwnerApi } from "../src/lib/ownerActions.ts";
 import { createSettings } from "../src/lib/settings.ts";
 import { createPutToR2 } from "../src/lib/uploadTransport.ts";
+
+// File-based streaming PUT: production streams the archive from disk in Rust;
+// node streams it the same way here so the body never materializes in memory.
+async function putArchive({ url, method, headers, archivePath }) {
+  const res = await fetch(url, {
+    method,
+    headers,
+    body: createReadStream(archivePath),
+    duplex: "half",
+  });
+  return res.status;
+}
 
 const BACKEND_DIR = fileURLToPath(
   new URL("../../FarmCrossSync25-backend", import.meta.url),
@@ -147,7 +161,7 @@ async function main() {
     const stamp = Date.now();
     const putToR2 = createPutToR2({
       baseUrl: BASE,
-      readFile: async (path) => new Uint8Array(readFileSync(path)),
+      putArchive,
     });
     // No-op scheduler: farm screens load on demand and never leave a live timer.
     const noopScheduler = { setInterval: () => 0, clearInterval: () => {} };
