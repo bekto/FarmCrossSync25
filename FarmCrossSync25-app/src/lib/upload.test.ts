@@ -7,6 +7,7 @@ import {
   type UploadDeps,
   type UploadProgress,
 } from "./upload.ts";
+import { detectConflict } from "./conflict.ts";
 import type { PackProgress, SyncState } from "./fs25.ts";
 
 const HASH = "a".repeat(64);
@@ -284,4 +285,118 @@ test("sync state records the uploaded hash and time after completion", async () 
   assert.equal(state.localHash, HASH);
   assert.equal(state.lastDownloadedHash, "dl", "other fields are preserved");
   assert.equal(state.slot, 4, "slot preserved");
+});
+
+// --- Ticket 73: the upload is the most recent sync baseline ----------------
+
+test("a successful upload advances the sync baseline", async () => {
+  let written: SyncState | null = null;
+  const { deps } = makeDeps({
+    readSyncState: async () => ({
+      farmId: "f1",
+      localHash: "old",
+      lastUploadedHash: "older-up",
+      lastUploadedAt: "2020-01-01T00:00:00.000Z",
+      lastDownloadedHash: "dl",
+      lastDownloadedAt: "2020-01-02T00:00:00.000Z",
+      boundSavePath: "/saves/savegame1",
+      slot: 4,
+      lastSyncedHash: "older-sync",
+      lastSyncedAt: "2020-01-03T00:00:00.000Z",
+      updatedAt: "2020-01-04T00:00:00.000Z",
+    }),
+    writeSyncState: async (_farmId, state) => {
+      written = state;
+      return state;
+    },
+  });
+
+  const result = await runUpload(
+    { farmId: "f1", savePath: "/saves/savegame1" },
+    deps,
+  );
+
+  assert.equal(result.ok, true);
+  assert.ok(written);
+  if (!written) return;
+  // The uploaded hash and timestamp are the most recent sync baseline.
+  assert.equal(written.lastSyncedHash, HASH);
+  assert.equal(written.lastSyncedAt, UPLOADED_AT);
+  assert.equal(written.lastUploadedHash, HASH);
+  assert.equal(written.lastUploadedAt, UPLOADED_AT);
+  // Unrelated per-farm state survives the merge.
+  assert.equal(written.boundSavePath, "/saves/savegame1", "bound slot preserved");
+  assert.equal(written.slot, 4, "slot preserved");
+  assert.equal(written.lastDownloadedHash, "dl", "download history preserved");
+  assert.equal(written.lastDownloadedAt, "2020-01-02T00:00:00.000Z");
+});
+
+test("a failed upload leaves the previous sync baseline byte-identical", async () => {
+  const previous: SyncState = {
+    farmId: "f1",
+    localHash: "old",
+    lastUploadedHash: "up",
+    lastUploadedAt: "2020-01-01T00:00:00.000Z",
+    lastDownloadedHash: "dl",
+    lastDownloadedAt: "2020-01-02T00:00:00.000Z",
+    boundSavePath: "/saves/savegame1",
+    slot: 4,
+    lastSyncedHash: "baseline",
+    lastSyncedAt: "2020-01-03T00:00:00.000Z",
+    updatedAt: "2020-01-04T00:00:00.000Z",
+  };
+  let stored: SyncState | null = previous;
+  const before = JSON.stringify(previous);
+  const { deps, calls } = makeDeps({
+    readSyncState: async () => stored,
+    writeSyncState: async (_farmId, state) => {
+      stored = state;
+      return state;
+    },
+    putToR2: async () => {
+      calls.push("put-failed");
+      throw new Error("network down");
+    },
+  });
+
+  const result = await runUpload(
+    { farmId: "f1", savePath: "/saves/savegame1" },
+    deps,
+  );
+
+  assert.equal(result.ok, false);
+  assert.ok(!calls.includes("writeSync"), "no state write on failure");
+  assert.equal(JSON.stringify(stored), before, "baseline byte-identical");
+});
+
+test("upload-then-modify triggers conflict detection before a download", async () => {
+  let written: SyncState | null = null;
+  const { deps } = makeDeps({
+    writeSyncState: async (_farmId, state) => {
+      written = state;
+      return state;
+    },
+  });
+
+  const result = await runUpload(
+    { farmId: "f1", savePath: "/saves/savegame1" },
+    deps,
+  );
+
+  assert.equal(result.ok, true);
+  assert.ok(written);
+  if (!written) return;
+  // An unchanged local save matches the new baseline: no conflict.
+  assert.equal(
+    detectConflict({ localHash: HASH, lastSyncedHash: written.lastSyncedHash }),
+    false,
+  );
+  // A local modification after the upload conflicts before the cloud download.
+  assert.equal(
+    detectConflict({
+      localHash: "b".repeat(64),
+      lastSyncedHash: written.lastSyncedHash,
+    }),
+    true,
+  );
 });

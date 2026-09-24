@@ -34,7 +34,7 @@
 
 ## Work Log
 - Done: deleted `SaveLocation.svelte`, `onboarding.ts` + test (only SaveLocation imported them; `describeValidation` had no other users, so it was dropped rather than moved). Removed `set_bound_save` (Rust command + registration, `SyncStateStore` method + its test, TS `setBoundSave`, lifecycle-e2e stub); two Rust tests switched to `write`. `scan_saves` kept.
-- Real-save check: user gave FS25 root `~/.local/share/OnlineFix Linux Launcher/prefixes/FarmingSimulator2025/pfx/drive_c/users/steamuser/My Documents/My Games/FarmingSimulator2025/` (read-only, no extraction needed).
+- Real-save check: user gave their FS25 root (a real save directory outside the repo; exact path withheld as personal data) (read-only, no extraction needed).
   - `grep -rnoI "savegame[0-9]\+" savegame1/` → no output
   - `grep -rlI "savegame" savegame1/` → `savegame1/careerSavegame.xml` only; matches are the tags `careerSavegame`, `savegameName`, `isCrossPlatformSavegame`, not the folder name
   - (FS25's own `savegameBackup/savegame1_backupLatest.txt` contains `savegame1`, but it lives outside the save folder and is not packed.)

@@ -114,16 +114,17 @@ export function createFarmSetup(deps: FarmSetupDeps): FarmSetup {
         const farm = await deps.api.createFarm(trimmed);
         const farms = await deps.api.listFarms().catch(() => [] as FarmSummary[]);
         deps.setFarms(farms.some((f) => f.id === farm.id) ? farms : [...farms, farm]);
-        let bindFailed = false;
+        let bindError: unknown = null;
         try {
           await deps.bindSlot(farm.id, slot);
-        } catch {
-          bindFailed = true;
+        } catch (cause) {
+          bindError = cause;
         }
         deps.setActiveFarm(farm.id);
-        if (bindFailed) {
-          state.error =
-            "Farm created, but the slot could not be linked. Choose it on the Farm screen.";
+        if (bindError !== null) {
+          // Surface the real cause (e.g. a slot owned by another farm) so the
+          // user knows why the link failed (ticket 80).
+          state.error = `Farm created, but the slot could not be linked (${describeError(bindError)}). Choose it on the Farm screen.`;
         }
         state.message = farm.code
           ? `Created ${farm.name} — farm code ${farm.code}.`
@@ -155,14 +156,14 @@ export function createFarmSetup(deps: FarmSetupDeps): FarmSetup {
       emit();
       try {
         const { farmId } = await deps.api.joinFarm(trimmed);
-        let bindFailed = false;
+        let bindError: unknown = null;
         try {
           await deps.bindSlot(farmId, slot);
-        } catch {
-          bindFailed = true;
+        } catch (cause) {
+          bindError = cause;
         }
-        state.message = bindFailed
-          ? "Request sent. Choose your slot on the Farm screen once accepted."
+        state.message = bindError !== null
+          ? `Request sent. The slot could not be linked (${describeError(bindError)}). Choose your slot on the Farm screen once accepted.`
           : "Request sent. The farm owner must accept it before the farm appears.";
         return true;
       } catch (cause) {

@@ -64,7 +64,16 @@ destructive choice is never a bare "Confirm".
   savegame-not-found, invalid-save, hash-mismatch).
 - Upload/download failure copy uses the phrases "local save is unchanged and
   safe" / "original save is unchanged and recoverable" rather than reusing the
-  offline sentence; the spec requires the promise, not specific wording.
+  offline sentence; the spec requires the promise, not specific wording. The
+  "unchanged/recoverable" promise is reserved for failures *before* the install
+  replaces the save: a download whose install succeeded but whose bookkeeping
+  failed reports partial success (`download.ts` `INSTALLED_NOT_RECORDED_MESSAGE`)
+  — it states the save WAS installed and never claims the original is
+  unchanged (ticket 75).
+- A local slot owned by another farm renders `fs25.ts` `slotConflictMessage`
+  ("Slot N is already linked to another farm; choose a different slot") wherever
+  a binding error surfaces (settings, farm setup, download recovery) instead of
+  raw error JSON (ticket 80).
 - `noRequests` extends the bare "No pending join requests." with "New requests
   will appear here." for informativeness (criterion 2).
 - Confirmation dialogs render the action button before Cancel; the spec lists

@@ -34,7 +34,6 @@
     cleanupPack,
     cleanupUnpack,
     computeHash,
-    createBackup,
     installSaveToSlot,
     listSlotBindings,
     listSlots,
@@ -204,8 +203,6 @@
   const downloadDeps = (): DownloadDeps => ({
     readMetadata,
     computeHash,
-    createBackup: async (savePath) =>
-      createBackup(savePath, await getBackupLocation()),
     downloadAuthorize: async ({ farmId, playerId }) => {
       // Backend wraps the authorization in `{ authorization }`.
       const body = await api.post<{ authorization: DownloadAuthorization }>(
@@ -216,6 +213,8 @@
     },
     fetchArchive: (authorization) => getToDisk(authorization),
     unpackSave,
+    // The Rust replacement creates the one backup under the configured dir
+    // (passed via `input.backupDir`); there is no TS-side backup (ticket 87).
     installSaveToSlot,
     setFarmSlot,
     readSyncState,
@@ -358,9 +357,14 @@
           fs25Root: root,
           slot: card.slot,
           slotPath: card.path,
-          slotUsed: card.status !== "empty",
+          // Used-vs-empty comes from the actual folder existence (SlotInfo.used),
+          // never from the binding/status: a bound-but-empty slot installs into
+          // the empty slot path (ticket 74).
+          slotUsed: card.used,
           expectedSha256: save.sha256,
           apiBaseUrl: API_BASE_URL,
+          // The replacement's single backup goes to the configured location.
+          backupDir: await getBackupLocation(),
         };
         const callbacks = {
           onPhase: (phase: DownloadPhase) => {
@@ -410,8 +414,14 @@
         downloadPhase = null;
         if (download.ok) {
           downloadedAt = download.syncedAt;
+          // The save is installed on both outcomes; re-derive the bound save so
+          // the sidebar reflects it even when only the bookkeeping failed.
           await refreshBoundSave();
-          return { ok: true };
+          // A partial result (ticket 75) carries accurate copy: the save WAS
+          // installed, only the sync state could not be recorded.
+          return download.outcome === "partial"
+            ? { ok: true, message: download.message }
+            : { ok: true };
         }
         const message = friendlyErrorMessage(download.message);
         pushToast(message);

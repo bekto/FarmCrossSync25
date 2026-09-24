@@ -8,7 +8,9 @@
 // Sequence: validate -> (size warning) -> pack (progress) -> hash -> authorize
 // -> PUT to R2 -> upload-complete -> write sync state. upload-complete is the
 // mutation point: if anything fails before it succeeds, the previous cloud save
-// stays authoritative and the local save is untouched.
+// stays authoritative and the local save is untouched (and the sync baseline is
+// left byte-identical). A completed upload advances `lastSyncedHash`/
+// `lastSyncedAt`, so later downloads compare against the uploaded save.
 
 import type {
   PackProgress,
@@ -199,6 +201,11 @@ export async function runUpload(
     });
 
     const existing = await deps.readSyncState(farmId);
+    // A completed upload is a successful sync: advance the upload fields AND
+    // the `lastSyncedHash`/`lastSyncedAt` baseline (sync_state.rs field docs),
+    // merging into the existing per-farm state so the bound slot, download
+    // history, and timestamps are preserved. Failure paths above never write,
+    // so the previous baseline stays byte-identical.
     await deps.writeSyncState(farmId, {
       farmId,
       localHash: hash,
@@ -208,8 +215,8 @@ export async function runUpload(
       lastDownloadedAt: existing?.lastDownloadedAt ?? null,
       boundSavePath: existing?.boundSavePath ?? savePath,
       slot: existing?.slot ?? null,
-      lastSyncedHash: existing?.lastSyncedHash ?? null,
-      lastSyncedAt: existing?.lastSyncedAt ?? null,
+      lastSyncedHash: hash,
+      lastSyncedAt: uploadedAt,
       updatedAt: existing?.updatedAt ?? null,
     });
 

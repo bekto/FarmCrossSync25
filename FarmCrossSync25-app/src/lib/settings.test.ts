@@ -247,6 +247,25 @@ test("changeSlot reports the error when setFarmSlot fails", async () => {
   assert.equal(settings.snapshot().slot, null);
 });
 
+test("changeSlot surfaces a slot owned by another farm clearly", async () => {
+  const r = record();
+  r.fs25Root = "/saves";
+  const settings = createSettings(makeDeps(r, {
+    setFarmSlot: async () => {
+      throw { kind: "slotConflict", slot: 2, ownerFarmId: "f2" };
+    },
+  }));
+  await settings.load("f1");
+
+  const ok = await settings.changeSlot("f1", 2);
+  assert.equal(ok, false);
+  assert.equal(
+    settings.snapshot().error,
+    "Slot 2 is already linked to another farm; choose a different slot",
+  );
+  assert.equal(settings.snapshot().slot, null, "the failed bind changes nothing");
+});
+
 test("changeSlot refuses when no FS25 folder is selected", async () => {
   const r = record();
   const settings = createSettings(makeDeps(r));

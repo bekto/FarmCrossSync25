@@ -19,7 +19,7 @@
 
 import { spawn, spawnSync } from "node:child_process";
 import { createHash } from "node:crypto";
-import { openSync, closeSync, mkdtempSync, writeFileSync, rmSync } from "node:fs";
+import { openSync, closeSync, mkdtempSync, statSync, writeFileSync, rmSync } from "node:fs";
 import { readFile } from "node:fs/promises";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
@@ -73,6 +73,9 @@ function sha256(bytes) {
 function localDeps({ archivePath, savePath, hash, onSyncState }) {
   let syncState = null;
   let packProgress = null;
+  // True byte length of the staged archive: upload-complete verifies fileSize
+  // against the stored object size (backend ticket 78).
+  const sizeBytes = statSync(archivePath).size;
   return {
     deps: {
       validateSave: async () => ({
@@ -88,12 +91,12 @@ function localDeps({ archivePath, savePath, hash, onSyncState }) {
         mapName: "E2E Map",
         path: savePath,
         lastModified: new Date().toISOString(),
-        sizeBytes: 16,
+        sizeBytes,
         contentHash: hash,
       }),
       packSave: async () => {
         packProgress?.({ savePath, percent: 50 });
-        return { archivePath, sizeBytes: 16, fileCount: 1 };
+        return { archivePath, sizeBytes, fileCount: 1 };
       },
       onPackProgress: async (handler) => {
         packProgress = handler;
@@ -133,7 +136,16 @@ async function main() {
   const logFd = openSync(join(workDir, "worker.log"), "w");
   const worker = spawn(
     NPX,
-    ["wrangler", "dev", "--port", String(PORT), "--var", "ENABLE_R2_TEST:true"],
+    [
+    "wrangler",
+    "dev",
+    "--port",
+    String(PORT),
+    "--var",
+    "ENABLE_R2_TEST:true",
+    "--var",
+    "FARM_CROSSSYNC_LOCAL_DEV:true",
+  ],
     { cwd: BACKEND_DIR, detached: true, stdio: ["ignore", logFd, logFd] },
   );
   closeSync(logFd);

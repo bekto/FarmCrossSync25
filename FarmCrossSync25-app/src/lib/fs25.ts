@@ -29,7 +29,8 @@ export interface SaveMetadata {
   path: string;
   lastModified: string | null;
   sizeBytes: number;
-  contentHash: string;
+  /** Canonical folder hash; `null` when unknown/unhashable (never `""`). */
+  contentHash: string | null;
 }
 
 export interface HashResult {
@@ -99,12 +100,24 @@ export interface InstallResult {
 export interface SlotBinding {
   farmId: string;
   slot: number;
+  /** Other farms whose state also claims this slot (pre-existing conflict). */
+  conflictingFarmIds?: string[];
 }
 
 export type Fs25Error =
   | { kind: "notImplemented"; command: string }
   | { kind: "inaccessible"; path: string; message: string }
-  | { kind: "internal"; message: string };
+  | { kind: "internal"; message: string }
+  | { kind: "slotConflict"; slot: number; ownerFarmId: string };
+
+/**
+ * Clear user-facing copy for a `slotConflict` error (ticket 80): the slot is
+ * already bound to a different farm. Single source shared by the error
+ * catalog and the download recovery message.
+ */
+export function slotConflictMessage(slot: number): string {
+  return `Slot ${slot} is already linked to another farm; choose a different slot`;
+}
 
 export function scanSaves(root?: string | null): Promise<SaveCandidate[]> {
   return invoke("scan_saves", { root: root ?? null });

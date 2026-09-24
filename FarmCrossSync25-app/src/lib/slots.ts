@@ -19,6 +19,8 @@ export type SlotStatus =
 export interface SlotCard {
   slot: number;
   path: string;
+  /** Whether the slot folder actually exists on disk (`SlotInfo.used`). */
+  used: boolean;
   title: string;
   subtitle: string;
   status: SlotStatus;
@@ -93,7 +95,13 @@ function subtitleFor(
 
 export function buildSlotCards(input: SlotCardInput): SlotCard[] {
   const { slots, bindings, farmId, farmNames, mode } = input;
-  const bindingBySlot = new Map(bindings.map((b) => [b.slot, b]));
+  // One owner per slot: the first binding for a slot wins, later claimants are
+  // dropped so the view model can never represent two owners for one slot
+  // (ticket 80). `list_slot_bindings` already reports conflicts the same way.
+  const bindingBySlot = new Map<number, SlotBinding>();
+  for (const binding of bindings) {
+    if (!bindingBySlot.has(binding.slot)) bindingBySlot.set(binding.slot, binding);
+  }
 
   const staged = slots.map((slot) => {
     const binding = bindingBySlot.get(slot.slot);
@@ -120,6 +128,9 @@ export function buildSlotCards(input: SlotCardInput): SlotCard[] {
     .map(({ slot, status, selectable, farmName }) => ({
       slot: slot.slot,
       path: slot.path,
+      // Used-vs-empty comes from the actual folder existence, never from the
+      // binding/status: a bound-but-empty slot must stay "empty" (ticket 74).
+      used: slot.used,
       title: `Slot ${slot.slot}`,
       subtitle: subtitleFor(slot, status, farmName, slot.slot === nextFree),
       status,
@@ -138,14 +149,16 @@ export function overwriteMessage(card: SlotCard): string {
 }
 
 /**
- * Which gate a download into `card` needs (ticket 66). "conflict" only when the
- * target is this farm's bound slot; any other used/unusable slot needs the
- * overwrite confirmation; an empty slot needs neither (see "When the conflict
- * gate runs" in the design doc).
+ * Which gate a download into `card` needs (ticket 66). Used-vs-empty comes
+ * from actual folder existence (`card.used`), never from the binding/status:
+ * a slot with no folder needs no gate at all — even when it is bound to this
+ * farm — because there is nothing to replace (ticket 74). This farm's bound
+ * slot *with a save* needs the conflict gate; any other used/unusable slot
+ * needs the overwrite confirmation.
  */
 export function downloadGate(card: SlotCard): "conflict" | "overwrite" | "none" {
+  if (!card.used) return "none";
   if (card.status === "linkedThis") return "conflict";
-  if (card.status === "empty") return "none";
   return "overwrite";
 }
 

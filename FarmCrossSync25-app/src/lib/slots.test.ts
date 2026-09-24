@@ -377,3 +377,71 @@ test("downloadGate: an empty slot needs no gate", () => {
   assert.equal(cards[0]!.status, "empty");
   assert.equal(downloadGate(cards[0]!), "none");
 });
+
+// --- Ticket 74: a bound-but-empty slot follows the empty-slot path -----------
+
+test("a bound-but-empty slot is used=false and needs no gate", () => {
+  const cards = buildSlotCards({
+    slots: [info(1)],
+    bindings: [{ farmId: "farm-a", slot: 1 }],
+    farmId: "farm-a",
+    farmNames: { "farm-a": "My Farm" },
+    mode: "download",
+  });
+  const card = cards[0]!;
+  assert.equal(card.status, "linkedThis", "the binding still shows as linked");
+  assert.equal(card.used, false, "used comes from folder existence, not the binding");
+  assert.equal(downloadGate(card), "none", "nothing to replace: no overwrite or conflict gate");
+  assert.equal(card.needsOverwriteConfirm, false, "no replacement confirmation");
+  assert.equal(card.preselected, true);
+});
+
+test("a bound slot with a save still needs the conflict gate and confirm", () => {
+  const cards = buildSlotCards({
+    slots: [used(1)],
+    bindings: [{ farmId: "farm-a", slot: 1 }],
+    farmId: "farm-a",
+    farmNames: {},
+    mode: "download",
+  });
+  const card = cards[0]!;
+  assert.equal(card.used, true);
+  assert.equal(downloadGate(card), "conflict");
+});
+
+test("used slots continue to require the overwrite gate", () => {
+  const cards = buildSlotCards({
+    slots: [used(1, "valid"), used(2, "invalid")],
+    bindings: [],
+    farmId: "farm-a",
+    farmNames: {},
+    mode: "download",
+  });
+  for (const card of cards) {
+    assert.equal(card.used, true);
+    assert.equal(card.needsOverwriteConfirm, true);
+    assert.equal(downloadGate(card), "overwrite");
+  }
+});
+
+// --- Ticket 80: the view model is single-owner-per-slot ----------------------
+
+test("the view model never represents two owners for one slot", () => {
+  const cards = buildSlotCards({
+    slots: [used(1), used(2)],
+    bindings: [
+      { farmId: "farm-a", slot: 1 },
+      { farmId: "farm-b", slot: 1, conflictingFarmIds: ["farm-a"] },
+      { farmId: "farm-b", slot: 2 },
+    ],
+    farmId: "farm-a",
+    farmNames: { "farm-a": "Farm A", "farm-b": "Farm B" },
+    mode: "download",
+  });
+  const bySlot = new Map(cards.map((c) => [c.slot, c]));
+  assert.equal(cards.length, 2, "one card per slot");
+  assert.equal(bySlot.get(1)!.status, "linkedThis", "the first claimant owns slot 1");
+  assert.equal(bySlot.get(1)!.subtitle, "Linked to Farm A");
+  assert.equal(bySlot.get(2)!.status, "linkedOther");
+  assert.equal(bySlot.get(2)!.subtitle, "Linked to Farm B");
+});

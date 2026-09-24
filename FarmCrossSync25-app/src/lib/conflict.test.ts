@@ -24,6 +24,7 @@ const INPUT = {
   slotUsed: true,
   expectedSha256: HASH,
   apiBaseUrl: "https://api.example",
+  backupDir: "/configured-backups",
 };
 
 function makeDeps(overrides: Partial<DownloadDeps> = {}) {
@@ -43,10 +44,6 @@ function makeDeps(overrides: Partial<DownloadDeps> = {}) {
     computeHash: async () => {
       calls.push("hash");
       return { path: "/tmp/staged", hash: HASH };
-    },
-    createBackup: async () => {
-      calls.push("backup");
-      return { backupPath: "/backups/savegame1_backup", createdAt: NOW, pruned: [] };
     },
     downloadAuthorize: async () => {
       calls.push("authorize");
@@ -71,7 +68,7 @@ function makeDeps(overrides: Partial<DownloadDeps> = {}) {
       return {
         path: "/saves/savegame1",
         contentHash: HASH,
-        backupPath: "/backups/savegame1_backup",
+        backupPath: "/configured-backups/savegame1_backup",
         wasEmpty: false,
       };
     },
@@ -204,9 +201,8 @@ test("conflict + Download Cloud Save proceeds into the normal flow", async () =>
   });
 
   assert.equal(result.ok, true);
-  assert.ok(calls.includes("backup"));
   assert.ok(calls.includes("fetch"));
-  assert.ok(calls.includes("install"));
+  assert.ok(calls.includes("install"), "the replacement runs (and creates its backup)");
   assert.ok(calls.includes("writeSync"));
 });
 
@@ -226,4 +222,65 @@ test("no conflict skips the dialog and downloads", async () => {
   assert.equal(result.ok, true);
   assert.equal(dialogCalls, 0);
   assert.ok(calls.includes("install"));
+});
+
+// --- Ticket 72: the production gate wiring (metadata.contentHash as localHash)
+
+test("an unchanged save after a successful sync produces no conflict", async () => {
+  // Mirrors +page.svelte: localHash comes from `readMetadata().contentHash`,
+  // lastSyncedHash from the persisted sync state written by the sync.
+  const metadata = {
+    slot: 1,
+    mapName: "Riverbend Springs",
+    path: "/saves/savegame1",
+    lastModified: NOW,
+    sizeBytes: 10,
+    contentHash: HASH as string | null,
+  };
+  const state = { lastSyncedHash: HASH as string | null };
+  const { deps, calls } = makeDeps();
+  let dialogCalls = 0;
+
+  const result = await runDownloadWithConflict(INPUT, deps, { confirm: () => true }, {
+    localHash: metadata.contentHash,
+    lastSyncedHash: state.lastSyncedHash,
+    choose: () => {
+      dialogCalls += 1;
+      return "keep";
+    },
+  });
+
+  assert.equal(result.ok, true);
+  assert.equal(dialogCalls, 0, "unchanged save must not raise the conflict warning");
+  assert.ok(calls.includes("install"), "download proceeds");
+});
+
+test("a changed save warns before a cloud download replaces it", async () => {
+  const metadata = {
+    slot: 1,
+    mapName: "Riverbend Springs",
+    path: "/saves/savegame1",
+    lastModified: NOW,
+    sizeBytes: 10,
+    contentHash: OTHER as string | null,
+  };
+  const state = { lastSyncedHash: HASH as string | null };
+  const { deps, calls } = makeDeps();
+  const seen: string[] = [];
+
+  const result = await runDownloadWithConflict(INPUT, deps, { confirm: () => true }, {
+    localHash: metadata.contentHash,
+    lastSyncedHash: state.lastSyncedHash,
+    choose: (message) => {
+      seen.push(message);
+      return "keep";
+    },
+  });
+
+  assert.equal(result.ok, false);
+  assert.deepEqual(seen, [CONFLICT_MESSAGE], "the conflict warning comes first");
+  assert.deepEqual(calls, [], "nothing runs before the user decides");
+  if (!result.ok) {
+    assert.ok(result.message.includes(CONFLICT_CANCELLED_MESSAGE));
+  }
 });

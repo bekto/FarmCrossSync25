@@ -42,6 +42,14 @@ pub enum Fs25Error {
     Inaccessible { path: String, message: String },
     /// Any other failure.
     Internal { message: String },
+    /// The requested slot is already bound to a different farm (ticket 80).
+    #[serde(rename_all = "camelCase")]
+    SlotConflict {
+        /// Slot that is already taken.
+        slot: u32,
+        /// Farm that currently owns the slot.
+        owner_farm_id: String,
+    },
 }
 
 impl Fs25Error {
@@ -63,6 +71,10 @@ impl std::fmt::Display for Fs25Error {
                 write!(f, "inaccessible: {path} ({message})")
             }
             Fs25Error::Internal { message } => write!(f, "internal: {message}"),
+            Fs25Error::SlotConflict {
+                slot,
+                owner_farm_id,
+            } => write!(f, "slot {slot} is already bound to farm {owner_farm_id}"),
         }
     }
 }
@@ -129,8 +141,10 @@ pub struct SaveMetadata {
     pub last_modified: Option<String>,
     /// Total size of the save folder in bytes.
     pub size_bytes: u64,
-    /// SHA-256 content hash over the folder contents.
-    pub content_hash: String,
+    /// SHA-256 content hash over the folder contents — the same canonical
+    /// digest `compute_hash` returns. `None` when the hash is unknown (e.g. a
+    /// folder with no regular files); never an empty string.
+    pub content_hash: Option<String>,
 }
 
 /// Result of hashing a save folder's contents.
@@ -264,6 +278,11 @@ pub struct InstallResult {
 }
 
 /// A farm bound to an FS25 save slot.
+///
+/// The output is single-owner-per-slot: when pre-existing state files claim one
+/// slot for several farms, the alphabetically first farm is listed as the owner
+/// and the others surface in `conflicting_farm_ids` — they are reported, never
+/// silently overwritten (ticket 80).
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(rename_all = "camelCase")]
 pub struct SlotBinding {
@@ -271,6 +290,9 @@ pub struct SlotBinding {
     pub farm_id: String,
     /// Slot the farm is bound to.
     pub slot: u32,
+    /// Other farms whose state also claims this slot (pre-existing conflict).
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub conflicting_farm_ids: Vec<String>,
 }
 
 // ---------------------------------------------------------------------------
@@ -332,7 +354,9 @@ pub fn detect_fs25_roots() -> Result<Vec<String>, Fs25Error> {
 /// List which farm owns which slot, from every stored sync-state file.
 ///
 /// A missing state directory or a malformed file is not an error; those farms
-/// are simply omitted. Farms with no slot are omitted too.
+/// are simply omitted. Farms with no slot are omitted too. The output never
+/// lists two owners for one slot: pre-existing conflicting claimants are
+/// reported in `SlotBinding::conflicting_farm_ids` instead (ticket 80).
 #[tauri::command]
 pub fn list_slot_bindings() -> Result<Vec<SlotBinding>, Fs25Error> {
     crate::fs25::sync_state::SyncStateStore::default_store().list_bindings()
@@ -504,6 +528,10 @@ pub fn write_sync_state(farm_id: String, state: SyncState) -> Result<SyncState, 
 
 /// Bind a farm to an FS25 save slot, recording `slot` and deriving
 /// `bound_save_path` as `<root>/savegame<slot>`. Creates state if none exists.
+///
+/// One farm per slot (ticket 80): the command fails with
+/// [`Fs25Error::SlotConflict`] when a different farm already owns the slot,
+/// leaving every stored binding untouched.
 #[tauri::command]
 pub fn set_farm_slot(farm_id: String, root: String, slot: u32) -> Result<SyncState, Fs25Error> {
     crate::fs25::sync_state::SyncStateStore::default_store().set_farm_slot(
@@ -555,5 +583,55 @@ mod tests {
             read_metadata("/nonexistent/fs25/savegame1".into()),
             Err(Fs25Error::Inaccessible { .. })
         ));
+    }
+
+    #[test]
+    fn read_metadata_exposes_the_canonical_folder_hash() {
+        // Drives the same command-level function the TS wrapper invokes, and
+        // asserts the exposed hash equals `hash_folder` for the same folder.
+        let root = std::env::temp_dir().join(format!(
+            "fs25-contract-metadata-hash-{}-{}",
+            std::process::id(),
+            std::time::SystemTime::now()
+                .duration_since(std::time::UNIX_EPOCH)
+                .unwrap()
+                .as_nanos()
+        ));
+        let save = root.join("savegame1");
+        std::fs::create_dir_all(save.join("sub")).unwrap();
+        std::fs::write(save.join("careerSavegame.xml"), b"<careerSavegame/>").unwrap();
+        std::fs::write(save.join("sub").join("map.gdm"), vec![7u8; 1024]).unwrap();
+
+        let exposed = read_metadata(save.to_string_lossy().into_owned()).unwrap();
+        let canonical = crate::fs25::hash::hash_folder(&save).unwrap();
+        assert_eq!(exposed.content_hash.as_deref(), Some(canonical.as_str()));
+
+        // The command contract serializes camelCase: TS receives `contentHash`.
+        let json = serde_json::to_value(&exposed).unwrap();
+        assert_eq!(json["contentHash"], serde_json::Value::String(canonical));
+
+        let _ = std::fs::remove_dir_all(&root);
+    }
+
+    #[test]
+    fn read_metadata_reports_an_unknown_hash_as_null() {
+        let root = std::env::temp_dir().join(format!(
+            "fs25-contract-metadata-null-{}-{}",
+            std::process::id(),
+            std::time::SystemTime::now()
+                .duration_since(std::time::UNIX_EPOCH)
+                .unwrap()
+                .as_nanos()
+        ));
+        // No regular files: the hash is unknown and must surface as `null`.
+        let save = root.join("savegame2");
+        std::fs::create_dir_all(&save).unwrap();
+
+        let exposed = read_metadata(save.to_string_lossy().into_owned()).unwrap();
+        assert_eq!(exposed.content_hash, None);
+        let json = serde_json::to_value(&exposed).unwrap();
+        assert_eq!(json["contentHash"], serde_json::Value::Null);
+
+        let _ = std::fs::remove_dir_all(&root);
     }
 }

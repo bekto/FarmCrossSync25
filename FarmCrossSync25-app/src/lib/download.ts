@@ -5,21 +5,28 @@
 // it emits. The downloaded archive is fetched straight from the presigned URL by
 // the injected `fetchArchive`; save bytes never pass through the Worker.
 //
-// Sequence: confirm -> (used slot: back up the local save) -> authorize + fetch
+// Sequence: confirm -> (used slot: preflight the local save) -> authorize + fetch
 // archive -> unpack to a staging dir -> hash the extracted content and compare
 // to the expected sha256 -> install into the chosen slot -> bind the farm to the
-// slot -> write sync state. Sync state is only written after a successful
-// install, and any failure before or during install leaves the original save
-// untouched and recoverable.
+// slot -> write sync state.
+//
+// The install is the only step that changes local content: the authoritative
+// Rust replacement creates the one backup (under the configured backup
+// directory, ticket 87) before it swaps a used slot, and creates no backup for
+// an empty slot. Bookkeeping after the install runs in its own recovery phase
+// (ticket 75): it retries once to reconcile, and on failure reports the save as
+// installed — never as "unchanged". Everything before a completed install
+// (including a rolled-back install failure) leaves the original save untouched
+// and recoverable.
 
 import type {
-  BackupResult,
   HashResult,
   InstallResult,
   SaveMetadata,
   SyncState,
   UnpackResult,
 } from "./fs25.ts";
+import { slotConflictMessage } from "./fs25.ts";
 
 /** Copy shown in the confirmation step; the user must confirm it. */
 export const DOWNLOAD_CONFIRMATION_MESSAGE =
@@ -37,10 +44,17 @@ export const VERIFICATION_FAILED_MESSAGE =
 export const ORIGINAL_SAVE_RECOVERABLE_MESSAGE =
   "Your original save is unchanged and recoverable.";
 
+/**
+ * Accurate partial-success copy (ticket 75): the save WAS installed and only
+ * the bookkeeping failed. This must never claim the original save is
+ * unchanged — the result type keeps the two outcomes apart so the copy can't.
+ */
+export const INSTALLED_NOT_RECORDED_MESSAGE = (slot: number, detail: string): string =>
+  `The cloud save was installed to Slot ${slot}, but the app could not record the sync state: ${detail}. Your new save is in place.`;
+
 /** Phases surfaced to the UI, in order. */
 export type DownloadPhase =
   | "confirming"
-  | "backing-up"
   | "downloading"
   | "unpacking"
   | "verifying"
@@ -65,7 +79,6 @@ export interface DownloadAuthorization {
 export interface DownloadDeps {
   readMetadata(path: string): Promise<SaveMetadata>;
   computeHash(path: string): Promise<HashResult>;
-  createBackup(savePath: string, backupDir?: string | null): Promise<BackupResult>;
   downloadAuthorize(input: {
     farmId: string;
     playerId: string;
@@ -75,11 +88,17 @@ export interface DownloadDeps {
     authorization: DownloadAuthorization,
   ): Promise<{ archivePath: string }>;
   unpackSave(archivePath: string, destDir?: string | null): Promise<UnpackResult>;
+  /**
+   * Install the staged save into the slot. The authoritative Rust replacement
+   * creates the single backup under `backupDir` before swapping a used slot and
+   * no backup for an empty slot (ticket 87).
+   */
   installSaveToSlot(
     root: string,
     slot: number,
     stagedPath: string,
     expectedHash?: string | null,
+    backupDir?: string | null,
   ): Promise<InstallResult>;
   setFarmSlot(farmId: string, root: string, slot: number): Promise<SyncState>;
   readSyncState(farmId: string): Promise<SyncState | null>;
@@ -97,11 +116,13 @@ export interface DownloadInput {
   slot: number;
   /** Absolute path of the target slot folder, from `SlotInfo.path`. */
   slotPath: string;
-  /** True when the target slot already holds a save. */
+  /** True when the target slot already holds a save (folder existence). */
   slotUsed: boolean;
   /** SHA-256 from the cloud save metadata; the extracted content must match. */
   expectedSha256: string;
   apiBaseUrl: string;
+  /** Configured backup directory for the replacement's backup; null = default. */
+  backupDir: string | null;
 }
 
 export interface DownloadCallbacks {
@@ -111,14 +132,36 @@ export interface DownloadCallbacks {
   confirm?(message: string): boolean | Promise<boolean>;
 }
 
-export interface DownloadSuccess {
+/** Install and slot binding + sync state all persisted. */
+export interface DownloadComplete {
   ok: true;
+  outcome: "complete";
   /** The persisted sync state after the successful install. */
   state: SyncState;
+  sha256: string;
+  /** The backup the replacement actually created; null for an empty slot. */
+  backupPath: string | null;
+  syncedAt: string;
+}
+
+/**
+ * The save was installed but the slot binding / sync-state write could not be
+ * reconciled (ticket 75). This is a success: the original save was replaced,
+ * so failure copy promising an unchanged original would be a lie.
+ */
+export interface DownloadPartial {
+  ok: true;
+  outcome: "partial";
+  /** Nothing was persisted: the bookkeeping failed. */
+  state: null;
+  /** Accurate partial-success copy: the save WAS installed. */
+  message: string;
   sha256: string;
   backupPath: string | null;
   syncedAt: string;
 }
+
+export type DownloadSuccess = DownloadComplete | DownloadPartial;
 
 export type DownloadFailureReason = "cancelled" | "verification" | "error";
 
@@ -131,24 +174,31 @@ export interface DownloadFailure {
 
 export type DownloadResult = DownloadSuccess | DownloadFailure;
 
-/** Case-insensitive hex comparison. */
-function sameHash(a: string, b: string): boolean {
-  return a.toLowerCase() === b.toLowerCase();
+/** Flatten a thrown cause to the detail shown in user-facing copy. */
+function detailOf(cause: unknown): string {
+  if (cause instanceof Error) return cause.message;
+  if (typeof cause === "string") return cause;
+  if (cause && typeof cause === "object") {
+    const obj = cause as Record<string, unknown>;
+    if (obj.kind === "slotConflict" && typeof obj.slot === "number") {
+      return slotConflictMessage(obj.slot);
+    }
+    if (typeof obj.message === "string" && obj.message) return obj.message;
+  }
+  return String(cause);
 }
 
 /**
- * Run the confirmed download-and-install flow.
- *
- * Resolves with the new sync state on success, or a failure whose `message`
- * promises the original save is recoverable. `installSaveToSlot` is only called
- * after the extracted content hash matches `expectedSha256`, and sync state is
- * only written after the install and the slot binding succeed.
+ * Everything up to and including the install: confirm, (used-slot preflight),
+ * fetch, unpack, verify, replace. A cancelled flow or any failure here leaves
+ * the original save untouched; on the resolved install result the save IS
+ * replaced. Temporary archive/staging cleanup runs in every case first.
  */
-export async function runDownload(
+async function installPhase(
   input: DownloadInput,
   deps: DownloadDeps,
-  { onPhase, onProgress, confirm }: DownloadCallbacks = {},
-): Promise<DownloadResult> {
+  { onPhase, onProgress, confirm }: DownloadCallbacks,
+): Promise<{ ok: true; hash: string; installed: InstallResult } | DownloadFailure> {
   const {
     farmId,
     playerId,
@@ -158,6 +208,7 @@ export async function runDownload(
     slotUsed,
     expectedSha256,
     apiBaseUrl,
+    backupDir,
   } = input;
   let archivePath: string | null = null;
   let stagedPath: string | null = null;
@@ -179,17 +230,11 @@ export async function runDownload(
       };
     }
 
-    // A used slot is preflighted and backed up; an empty slot has nothing to
-    // read or preserve, so both steps are skipped.
-    let backup: BackupResult | null = null;
+    // A used slot is preflighted so a broken local save aborts before anything
+    // runs; an empty slot has nothing to read. No backup is made here — the
+    // replacement creates the one authoritative backup (ticket 87).
     if (slotUsed) {
-      // Pre-flight: the bound local save must be readable before anything runs.
       await deps.readMetadata(slotPath);
-
-      onPhase?.("backing-up");
-      onProgress?.({ phase: "backing-up", percent: 0 });
-      backup = await deps.createBackup(slotPath);
-      onProgress?.({ phase: "backing-up", percent: 100 });
     }
 
     onPhase?.("downloading");
@@ -212,8 +257,8 @@ export async function runDownload(
     onPhase?.("verifying");
     onProgress?.({ phase: "verifying", percent: 0 });
     const { hash } = await deps.computeHash(stagedPath);
-    if (!sameHash(hash, expectedSha256)) {
-      // Abort before install: the original save is never touched.
+    // Case-insensitive hex comparison; a mismatch aborts before install.
+    if (hash.toLowerCase() !== expectedSha256.toLowerCase()) {
       return {
         ok: false,
         reason: "verification",
@@ -229,41 +274,17 @@ export async function runDownload(
       slot,
       stagedPath,
       expectedSha256,
+      backupDir,
     );
     onProgress?.({ phase: "replacing", percent: 100 });
-
-    // The install succeeded: bind the farm to the slot before persisting state.
-    await deps.setFarmSlot(farmId, fs25Root, slot);
-
-    const existing = await deps.readSyncState(farmId);
-    const syncedAt = new Date().toISOString();
-    const state = await deps.writeSyncState(farmId, {
-      farmId,
-      localHash: hash,
-      lastUploadedHash: existing?.lastUploadedHash ?? null,
-      lastUploadedAt: existing?.lastUploadedAt ?? null,
-      lastDownloadedHash: hash,
-      lastDownloadedAt: syncedAt,
-      boundSavePath: installed.path,
-      slot,
-      lastSyncedHash: hash,
-      lastSyncedAt: syncedAt,
-      updatedAt: existing?.updatedAt ?? null,
-    });
-
-    return {
-      ok: true,
-      state,
-      sha256: hash,
-      backupPath: backup?.backupPath ?? null,
-      syncedAt,
-    };
+    return { ok: true, hash, installed };
   } catch (cause) {
-    const detail = cause instanceof Error ? cause.message : String(cause);
+    // Cancelled pre-install work or a failed (rolled-back) install: the
+    // original save is untouched and recoverable.
     return {
       ok: false,
       reason: "error",
-      message: `Download failed: ${detail}. ${ORIGINAL_SAVE_RECOVERABLE_MESSAGE}`,
+      message: `Download failed: ${detailOf(cause)}. ${ORIGINAL_SAVE_RECOVERABLE_MESSAGE}`,
       error: cause,
     };
   } finally {
@@ -282,4 +303,71 @@ export async function runDownload(
       }
     }
   }
+}
+
+/**
+ * Run the confirmed download-and-install flow.
+ *
+ * Resolves a complete success (install, slot binding, and sync state all
+ * recorded), a partial success (the save WAS installed but the bookkeeping
+ * could not be reconciled — see [`DownloadPartial`]), or a pre-install failure
+ * whose `message` promises the original save is recoverable. `installSaveToSlot`
+ * is only called after the extracted content hash matches `expectedSha256`.
+ */
+export async function runDownload(
+  input: DownloadInput,
+  deps: DownloadDeps,
+  callbacks: DownloadCallbacks = {},
+): Promise<DownloadResult> {
+  const phase = await installPhase(input, deps, callbacks);
+  if (!phase.ok) return phase;
+
+  const { hash, installed } = phase;
+  const { farmId, fs25Root, slot } = input;
+
+  // --- Recovery phase (ticket 75) ------------------------------------------
+  // The install has replaced the slot: the save is IN. The bookkeeping below
+  // runs outside the install's failure path so its failures can never produce
+  // the "original save is unchanged" copy — that would be a lie from here on.
+  // One retry reconciles a transient slot-binding or sync-state write failure.
+  const syncedAt = new Date().toISOString();
+  let bookkeepingError: unknown = null;
+  let state: SyncState | null = null;
+  for (let attempt = 0; attempt < 2 && state === null; attempt += 1) {
+    try {
+      await deps.setFarmSlot(farmId, fs25Root, slot);
+      const existing = await deps.readSyncState(farmId);
+      state = await deps.writeSyncState(farmId, {
+        farmId,
+        localHash: hash,
+        lastUploadedHash: existing?.lastUploadedHash ?? null,
+        lastUploadedAt: existing?.lastUploadedAt ?? null,
+        lastDownloadedHash: hash,
+        lastDownloadedAt: syncedAt,
+        boundSavePath: installed.path,
+        slot,
+        lastSyncedHash: hash,
+        lastSyncedAt: syncedAt,
+        updatedAt: existing?.updatedAt ?? null,
+      });
+    } catch (cause) {
+      bookkeepingError = cause;
+    }
+  }
+
+  const shared = {
+    sha256: hash,
+    backupPath: installed.backupPath ?? null,
+    syncedAt,
+  };
+  if (state !== null) {
+    return { ok: true, outcome: "complete", state, ...shared };
+  }
+  return {
+    ok: true,
+    outcome: "partial",
+    state: null,
+    message: INSTALLED_NOT_RECORDED_MESSAGE(slot, detailOf(bookkeepingError)),
+    ...shared,
+  };
 }

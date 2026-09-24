@@ -13,7 +13,6 @@
 
   const LABELS: Record<DownloadPhase, string> = {
     confirming: "Confirming…",
-    "backing-up": "Backing up your save…",
     downloading: "Fetching the cloud save…",
     unpacking: "Unpacking…",
     verifying: "Verifying…",
@@ -36,7 +35,7 @@
       <span class="step">Step {step + 1} of {ORDER.length}</span>
     </div>
     <progress value={percent} max="100"></progress>
-    <p class="note"><Icon name="shield" size={13} />Your current save is backed up before anything is replaced.</p>
+    <p class="note"><Icon name="shield" size={13} />An existing save is backed up before it is replaced.</p>
   </div>
 {/if}
 

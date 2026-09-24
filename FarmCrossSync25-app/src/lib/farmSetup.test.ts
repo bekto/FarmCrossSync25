@@ -7,9 +7,9 @@ import {
 } from "./farmSetup.ts";
 
 const BIND_FAILURE_MESSAGE =
-  "Farm created, but the slot could not be linked. Choose it on the Farm screen.";
+  "Farm created, but the slot could not be linked (no slot). Choose it on the Farm screen.";
 const JOIN_BIND_FAILURE_MESSAGE =
-  "Request sent. Choose your slot on the Farm screen once accepted.";
+  "Request sent. The slot could not be linked (no slot). Choose your slot on the Farm screen once accepted.";
 
 function setup(overrides: Partial<FarmSetupDeps> = {}) {
   const calls: string[] = [];
@@ -139,4 +139,20 @@ test("join still succeeds when bindSlot fails", async () => {
   assert.deepEqual(calls, []);
   assert.equal(screen.snapshot().error, null);
   assert.equal(screen.snapshot().message, JOIN_BIND_FAILURE_MESSAGE);
+});
+
+test("create surfaces a slot owned by another farm clearly", async () => {
+  const { screen } = setup({
+    bindSlot: async () => {
+      throw { kind: "slotConflict", slot: 3, ownerFarmId: "farm-2" };
+    },
+  });
+
+  const ok = await screen.create("My Farm", 3);
+
+  assert.equal(ok, true, "the farm is still created");
+  assert.equal(
+    screen.snapshot().error,
+    "Farm created, but the slot could not be linked (Slot 3 is already linked to another farm; choose a different slot). Choose it on the Farm screen.",
+  );
 });

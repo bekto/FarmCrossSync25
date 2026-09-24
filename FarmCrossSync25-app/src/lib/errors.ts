@@ -12,6 +12,7 @@
 // cloud operations always state that local data is safe").
 
 import { writable } from "svelte/store";
+import { slotConflictMessage } from "./fs25.ts";
 import { LOCAL_SAVE_SAFE_MESSAGE } from "./upload.ts";
 import {
   ORIGINAL_SAVE_RECOVERABLE_MESSAGE,
@@ -76,13 +77,17 @@ export function errorMessage(key: ErrorKey): string {
  * Flatten any thrown cause to a message string. Tauri commands reject with the
  * serialized error object (e.g. `{ kind: "secureStore", message }`) rather than
  * an `Error`, so plain objects are unwrapped here instead of rendering as
- * "[object Object]" in the UI.
+ * "[object Object]" in the UI. Structured FS25 errors get their clear
+ * user-facing copy (ticket 80) rather than the raw JSON.
  */
 export function describeError(cause: unknown): string {
   if (cause instanceof Error) return cause.message;
   if (typeof cause === "string") return cause;
   if (cause && typeof cause === "object") {
     const obj = cause as Record<string, unknown>;
+    if (obj.kind === "slotConflict" && typeof obj.slot === "number") {
+      return slotConflictMessage(obj.slot);
+    }
     if (typeof obj.message === "string" && obj.message) return obj.message;
     if (typeof obj.error === "string" && obj.error) return obj.error;
     try {

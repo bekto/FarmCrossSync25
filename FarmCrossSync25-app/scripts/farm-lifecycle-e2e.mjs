@@ -109,7 +109,16 @@ async function main() {
   const logFd = openSync(join(workDir, "worker.log"), "w");
   const worker = spawn(
     NPX,
-    ["wrangler", "dev", "--port", String(PORT), "--var", "ENABLE_R2_TEST:true"],
+    [
+    "wrangler",
+    "dev",
+    "--port",
+    String(PORT),
+    "--var",
+    "ENABLE_R2_TEST:true",
+    "--var",
+    "FARM_CROSSSYNC_LOCAL_DEV:true",
+  ],
     { cwd: BACKEND_DIR, detached: true, stdio: ["ignore", logFd, logFd] },
   );
   closeSync(logFd);
@@ -204,7 +213,7 @@ async function main() {
           path: "",
           lastModified: new Date().toISOString(),
           sizeBytes: 0,
-          contentHash: "",
+          contentHash: null,
         }),
         getBackupLocation: async () => null,
         setBackupLocation: async () => ({}),

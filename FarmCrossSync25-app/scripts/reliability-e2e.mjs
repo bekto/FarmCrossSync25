@@ -22,6 +22,7 @@ import {
   mkdtempSync,
   openSync,
   rmSync,
+  statSync,
   writeFileSync,
 } from "node:fs";
 import { readFile } from "node:fs/promises";
@@ -73,6 +74,9 @@ async function waitForHealth(timeoutMs = 60000) {
 // upload-e2e.mjs so the orchestration being exercised is the production module.
 function localDeps({ archivePath, savePath, hash }) {
   let syncState = null;
+  // True byte length of the staged archive: upload-complete verifies fileSize
+  // against the stored object size (backend ticket 78).
+  const sizeBytes = statSync(archivePath).size;
   return {
     deps: {
       validateSave: async () => ({
@@ -88,10 +92,10 @@ function localDeps({ archivePath, savePath, hash }) {
         mapName: "Reliability Map",
         path: savePath,
         lastModified: new Date().toISOString(),
-        sizeBytes: 16,
+        sizeBytes,
         contentHash: hash,
       }),
-      packSave: async () => ({ archivePath, sizeBytes: 16, fileCount: 1 }),
+      packSave: async () => ({ archivePath, sizeBytes, fileCount: 1 }),
       onPackProgress: async () => () => {},
       computeHash: async () => ({ hash }),
       readSyncState: async () => syncState,
@@ -152,7 +156,16 @@ async function main() {
   const logFd = openSync(join(workDir, "worker.log"), "w");
   const worker = spawn(
     NPX,
-    ["wrangler", "dev", "--port", String(PORT), "--var", "ENABLE_R2_TEST:true"],
+    [
+    "wrangler",
+    "dev",
+    "--port",
+    String(PORT),
+    "--var",
+    "ENABLE_R2_TEST:true",
+    "--var",
+    "FARM_CROSSSYNC_LOCAL_DEV:true",
+  ],
     { cwd: BACKEND_DIR, detached: true, stdio: ["ignore", logFd, logFd] },
   );
   closeSync(logFd);

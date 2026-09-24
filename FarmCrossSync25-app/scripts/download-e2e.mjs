@@ -10,17 +10,18 @@
 // are checked byte-for-byte.
 //
 // What it checks:
-//   1. A (owner) uploads; B (member) downloads it. After confirm -> backup ->
+//   1. A (owner) uploads; B (member) downloads it. After confirm ->
 //      fetch -> unpack -> hash verify -> install, B's save content equals A's.
 //   2. A tampered archive fails verification: install is not called and B's
 //      original save is unchanged.
-//   3. The configured backup directory holds a timestamped copy of the previous
-//      local save after a successful download.
+//   3. The configured backup directory holds exactly one timestamped copy of
+//      the previous local save — the single backup the replacement creates.
 //   4. Fetch, unpack, and install failures each leave B's original save
 //      unchanged and write no sync state.
 //
 // Usage: node scripts/download-e2e.mjs   (starts and stops its own Worker)
-// Requires: backend deps installed; ENABLE_R2_TEST is set by this script.
+// Requires: backend deps installed; ENABLE_R2_TEST and FARM_CROSSSYNC_LOCAL_DEV
+// are set by this script.
 
 import { spawn, spawnSync } from "node:child_process";
 import { createHash } from "node:crypto";
@@ -131,8 +132,10 @@ function writeSave(dir, files) {
 }
 
 // `runDownload` dependencies backed by a real temp directory tree. `overrides`
-// let each failure scenario inject a throwing step.
-function makeLocalFs({ backupDir, overrides = {} }) {
+// let each failure scenario inject a throwing step. The backup directory comes
+// through `installSaveToSlot`'s `backupRoot` argument — the same plumbing the
+// production flow uses (ticket 87).
+function makeLocalFs({ overrides = {} }) {
   let syncState = null;
   const syncWrites = [];
   const calls = [];
@@ -150,22 +153,13 @@ function makeLocalFs({ backupDir, overrides = {} }) {
       };
     },
     computeHash: async (path) => ({ path, hash: hashDir(path) }),
-    createBackup: async (savePath) => {
-      calls.push("backup");
-      const dest = join(
-        backupDir,
-        `${basename(savePath)}_${new Date().toISOString().replace(/[:.]/g, "-")}`,
-      );
-      cpSync(savePath, dest, { recursive: true });
-      return { backupPath: dest, createdAt: new Date().toISOString(), pruned: [] };
-    },
     unpackSave: async (archivePath) => {
       calls.push("unpack");
       const dest = mkdtempSync(join(tmpdir(), "download-unpack-"));
       deserializeTo(dest, readFileSync(archivePath));
       return { destPath: dest, fileCount: listFiles(dest).length };
     },
-    installSaveToSlot: (root, slot, stagedPath, expectedHash) => {
+    installSaveToSlot: (root, slot, stagedPath, expectedHash, backupRoot) => {
       calls.push("install");
       const targetPath = join(root, `savegame${slot}`);
       const stagedHash = hashDir(stagedPath);
@@ -176,9 +170,17 @@ function makeLocalFs({ backupDir, overrides = {} }) {
         throw new Error("staged content hash does not match the expected hash");
       }
       const wasEmpty = !existsSync(targetPath);
+      // The authoritative replacement creates the one backup under the
+      // configured `backupRoot` before swapping a used slot (ticket 87).
+      let backupPath = null;
       if (wasEmpty) {
         cpSync(stagedPath, targetPath, { recursive: true });
       } else {
+        backupPath = join(
+          backupRoot,
+          `${basename(targetPath)}_${new Date().toISOString().replace(/[:.]/g, "-")}`,
+        );
+        cpSync(targetPath, backupPath, { recursive: true });
         const aside = `${targetPath}.aside-${Date.now()}`;
         cpSync(targetPath, aside, { recursive: true });
         try {
@@ -195,7 +197,7 @@ function makeLocalFs({ backupDir, overrides = {} }) {
       return {
         path: targetPath,
         contentHash: hashDir(targetPath),
-        backupPath: null,
+        backupPath,
         wasEmpty,
       };
     },
@@ -302,7 +304,16 @@ async function main() {
   const logFd = openSync(join(workDir, "worker.log"), "w");
   const worker = spawn(
     NPX,
-    ["wrangler", "dev", "--port", String(PORT), "--var", "ENABLE_R2_TEST:true"],
+    [
+    "wrangler",
+    "dev",
+    "--port",
+    String(PORT),
+    "--var",
+    "ENABLE_R2_TEST:true",
+    "--var",
+    "FARM_CROSSSYNC_LOCAL_DEV:true",
+  ],
     { cwd: BACKEND_DIR, detached: true, stdio: ["ignore", logFd, logFd] },
   );
   closeSync(logFd);
@@ -352,7 +363,6 @@ async function main() {
     const downloadDeps = (fs, fetchArchive) => ({
       readMetadata: fs.deps.readMetadata,
       computeHash: fs.deps.computeHash,
-      createBackup: fs.deps.createBackup,
       downloadAuthorize: async ({ farmId, playerId }) => {
         const body = await clientB.post(
           `/saves/${playerId}/download-authorize`,
@@ -375,7 +385,7 @@ async function main() {
       baseUrl: BASE,
       readFile: async (path) => new Uint8Array(readFileSync(path)),
     });
-    const aFs = makeLocalFs({ backupDir });
+    const aFs = makeLocalFs({});
     const uploadResult = await runUpload(
       { farmId: farm.id, savePath: aSave },
       {
@@ -399,7 +409,7 @@ async function main() {
     check("B sees A's save with A's hash", aSaveRow?.sha256 === aHash, JSON.stringify(aSaveRow));
 
     // --- Criterion 1: B downloads A's save and it replaces B's local save --
-    const bFs = makeLocalFs({ backupDir });
+    const bFs = makeLocalFs({});
     const getToDisk = createGetToDisk({ baseUrl: BASE, stageArchive });
     const phases = [];
     const download = await runDownload(
@@ -412,6 +422,7 @@ async function main() {
         slotUsed: true,
         expectedSha256: aSaveRow.sha256,
         apiBaseUrl: BASE,
+        backupDir,
       },
       downloadDeps(bFs, (authorization) => getToDisk(authorization)),
       { onPhase: (phase) => phases.push(phase) },
@@ -421,7 +432,7 @@ async function main() {
     check(
       "criterion 1: download runs every phase in order",
       phases.join(",") ===
-        "confirming,backing-up,downloading,unpacking,verifying,replacing",
+        "confirming,downloading,unpacking,verifying,replacing",
       phases.join(","),
     );
     check(
@@ -451,7 +462,7 @@ async function main() {
 
     // --- Criterion 2: tampered archive fails verification, no replace ------
     resetB();
-    const tamperFs = makeLocalFs({ backupDir });
+    const tamperFs = makeLocalFs({});
     const tamperDownload = await runDownload(
       {
         farmId: farm.id,
@@ -462,6 +473,7 @@ async function main() {
         slotUsed: true,
         expectedSha256: aSaveRow.sha256,
         apiBaseUrl: BASE,
+        backupDir,
       },
       downloadDeps(
         tamperFs,
@@ -495,7 +507,7 @@ async function main() {
     // --- Criterion 4: each failure path leaves the original recoverable -----
     async function failingDownload(label, fetchArchive, overrides) {
       resetB();
-      const fs = makeLocalFs({ backupDir, overrides });
+      const fs = makeLocalFs({ overrides });
       const result = await runDownload(
         {
           farmId: farm.id,
@@ -506,6 +518,7 @@ async function main() {
           slotUsed: true,
           expectedSha256: aSaveRow.sha256,
           apiBaseUrl: BASE,
+          backupDir,
         },
         downloadDeps(fs, fetchArchive),
       );

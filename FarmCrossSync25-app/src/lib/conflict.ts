@@ -15,6 +15,8 @@
 //   - `localHash === null` means the local save's content hash is unknown or
 //     unreadable. We cannot prove the local save is unchanged, so the safest
 //     choice is to warn: treat it as a conflict.
+//   - An empty string is never a hash: it is normalized to "unknown" (null) so
+//     a placeholder can never silently compare as a differing hash.
 
 import {
   runDownload,
@@ -57,15 +59,18 @@ function sameHash(a: string, b: string): boolean {
  * True when a download could destroy a local save that changed since the last
  * sync: both hashes are present and differ. First sync (`lastSyncedHash` null)
  * is never a conflict; an unknown local hash is treated as a conflict because
- * the local state cannot be verified (see file header).
+ * the local state cannot be verified (see file header). An empty string is
+ * never a hash: it counts as "unknown" (null), never as a matching hash.
  */
 export function detectConflict({
   localHash,
   lastSyncedHash,
 }: DetectConflictInput): boolean {
-  if (lastSyncedHash === null) return false;
-  if (localHash === null) return true;
-  return !sameHash(localHash, lastSyncedHash);
+  const synced = lastSyncedHash === null || lastSyncedHash === "" ? null : lastSyncedHash;
+  if (synced === null) return false;
+  const local = localHash === null || localHash === "" ? null : localHash;
+  if (local === null) return true;
+  return !sameHash(local, synced);
 }
 
 export interface ResolveConflictInput extends DetectConflictInput {

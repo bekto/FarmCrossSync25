@@ -2,6 +2,7 @@ import { test } from "node:test";
 import assert from "node:assert/strict";
 import { get } from "svelte/store";
 import {
+  describeError,
   dismissToast,
   EMPTY_STATES,
   ERROR_MESSAGES,
@@ -125,6 +126,16 @@ test("toasts push, carry the catalog copy, and dismiss", () => {
   assert.equal(remaining.length, 1);
   assert.equal(remaining[0].message, "raw message");
   clearAll();
+});
+
+test("describeError renders a slot conflict as clear user copy", () => {
+  assert.equal(
+    describeError({ kind: "slotConflict", slot: 2, ownerFarmId: "f2" }),
+    "Slot 2 is already linked to another farm; choose a different slot",
+  );
+  // Errors and plain strings pass through unchanged.
+  assert.equal(describeError(new Error("slot busy")), "slot busy");
+  assert.equal(describeError("raw"), "raw");
 });
 
 function clearAll() {
