@@ -72,9 +72,47 @@ The last member leaving leaves the farm row in place; the farm cascade is
 out of scope here.
 
 **Member cap:** a farm holds a maximum of 16 members. The shared constant is
-`MAX_FARM_MEMBERS` in `src/farms.ts`, with `isAtCapacity` / `assertCanAddMember`
-guards. Handlers that add members call the guard and reject joins at capacity.
-`npm test` covers the 15-ok / 16-rejected boundary.
+`MAX_FARM_MEMBERS` in `src/farms.ts`. Enforcement is two-layered: the join
+route pre-checks capacity as an early-out (409
+`{"error": "farm_full", "max": 16}` — fail closed if the count is unreadable),
+and the authoritative guard is the accept-time membership `INSERT ... SELECT
+... WHERE (SELECT COUNT(*) ...) < 16` inside the same D1 batch that resolves
+the invite (see "Accepting a join request"). Concurrent accepts can therefore
+never exceed 16 members. `npm test` covers the 15-ok / 16-rejected boundary
+and fires concurrent accepts (`src/capacity.test.mjs`).
+
+### Join requests
+
+`POST /farms/:farmId/join` — body `{ code }`. A caller may hold at most one
+active (pending) request per farm. Migration `0005_unique_pending_join_requests.sql`
+enforces this as a database invariant — a partial unique index on
+`farm_invites(farm_id, user_id) WHERE status = 'pending'` — so concurrent
+joins from one installation cannot create duplicate pending rows even when
+they race past the handler's existence check: the losing insert maps the
+unique violation to the same result as the sequential case,
+`409 {"error": "pending request"}` (never a 500).
+
+Denied requests are history: the index covers only `status = 'pending'`, so a
+denied user submits a **new** pending row (a new `invite` id) without
+reopening the denied one. Because duplicates are impossible by construction,
+the owner's `GET /farms/:farmId/invites` (which lists only `pending` rows)
+never contains two active requests for the same user.
+
+### Accepting a join request
+
+`POST /invites/:inviteId/accept` resolves a pending request in a single
+batch whose statements are each conditional, so racing accepts are safe
+without interactive transactions (D1 has none): the membership row is only
+inserted while the farm has room, the caller is not already a member, and the
+invite is still pending; the invite flips to `accepted` only while it is still
+pending *and* the membership exists. Exactly one racing accept performs the
+transition and gets `200 {"invite": {..., "status": "accepted"}}`; the loser
+gets a deterministic conflict that matches the sequential equivalent —
+`409 {"error": "invite_not_pending"}` when a concurrent request already
+resolved the invite (same as a repeat accept), `409 {"error": "farm_full", "max": 16}`
+when the capacity guard blocked the insert. The losing request's invite stays
+`pending` and no membership is created, so acceptance result and membership
+state always agree.
 
 ## Cloud save sync
 
@@ -116,9 +154,36 @@ cloud save authoritative.
 
 `POST /saves/upload-complete` — body
 `{ farmId, objectKey?, saveName, fileSize, sha256 }`. Re-checks auth,
-membership, and that `objectKey` is the caller's own (403); verifies the object
-exists in R2 (404 if not); then upserts `player_saves` for
-`(farm_id, user_id)`, replacing any previous row. Returns `{ save: {...} }`.
+membership, and that `objectKey` is the caller's own (403); then verifies the
+stored object before any write:
+
+- object missing in R2 → `404 {"error": "object not found"}`;
+- object larger than the configured maximum →
+  `413 {"error": "object_too_large", "max": <bytes>}`;
+- `object.size` (from `BUCKET.head`) differs from the reported `fileSize` →
+  `409 {"error": "size_mismatch", "objectSize": <bytes>, "reportedSize": <bytes>}`;
+- malformed metadata (empty `saveName`, non-integer/negative `fileSize`,
+  `sha256` not 64 hex chars) → `400` with a descriptive `error`.
+
+Every rejection returns before the upsert, so a missing, oversized, or
+mismatched upload never replaces the previous authoritative `player_saves`
+row (the upsert itself is a single atomic `INSERT ... ON CONFLICT` statement,
+which replaces at most one row). On success the route upserts `player_saves`
+for `(farm_id, user_id)` and returns `{ save: {...} }`.
+
+**Maximum save size** is configurable per deployment with the `MAX_SAVE_SIZE_BYTES`
+env var (a plain wrangler var/secret, decimal bytes). Unset or invalid values
+fall back to `DEFAULT_MAX_SAVE_SIZE_BYTES` (512 MiB, `src/saves.ts`) — a
+documented default, well above the spec's ~200 MB warning threshold, so the
+cap only rejects implausible objects until a deployment tightens it.
+
+**Content-hash trust boundary:** `sha256` is **client-asserted and NOT
+verified by the Worker**. The archive bytes move directly between the client
+and R2, so the Worker never sees them; it stores the claimed hash as metadata
+only. This is a deliberate trust boundary: integrity is enforced at download
+time by the downloading client, which verifies the stored `sha256` against the
+extracted archive (see "Downloading a save"). A lying uploader can record a
+false hash, but every downloader detects it before touching local saves.
 
 ### Downloading a save
 
@@ -151,11 +216,70 @@ upload flow end to end.
 
 The desktop client's `putToR2` transport (`src/lib/uploadTransport.ts`) detects
 the `presigned: false` marker and PUTs the archive to this Worker's dev
-`/r2-test/:key` route (enabled by `ENABLE_R2_TEST=true`) instead of the
+`/r2-test/:key` route (see "Development-only R2 test route") instead of the
 placeholder URL. Because an object key contains slashes and the route takes a
 single segment, the client percent-encodes the whole key (`/` -> `%2F`) and the
 Worker decodes it before storing. `npm run upload:e2e` in the desktop repo
 drives `runUpload` + the API client + this transport against the local Worker.
+
+## Development-only R2 test route
+
+`PUT /r2-test/:key` and `GET /r2-test/:key` are a local-development affordance
+for round-tripping bytes through the `BUCKET` binding without Cloudflare
+account credentials. They have no auth and must never be reachable in a
+deployed environment. They are protected by a fail-closed stack — every layer
+must be satisfied or the request is rejected:
+
+1. **Switch** — `ENABLE_R2_TEST` must be exactly `"true"`. Anything else (the
+   default) makes the route return 404, as if unregistered.
+2. **Explicit local-only marker** — `FARM_CROSSSYNC_LOCAL_DEV` must be exactly
+   `"true"`. This is a declaration that the running Worker is a local dev
+   instance; it belongs ONLY in local configuration (below).
+3. **Loopback Host** — the request host must be `localhost`, `127.0.0.1`, or
+   `[::1]` (any port). A deployed Worker is only ever reached with the public
+   zone name as host, so even a misconfigured deployment rejects every request.
+
+Violations of (2) or (3) return `403 {"error": "r2_test_local_only"}` and log a
+loud misconfiguration warning.
+
+4. **Key space** — `:key` (URL-decoded) must match
+   `farms/{farmId}/players/{userId}/save` with id-shaped segments
+   (`[A-Za-z0-9_-]+`), i.e. exactly the shape `saveObjectKey` produces.
+   Anything else — other bucket keys, extra segments, or traversal (`..`) —
+   returns `400 {"error": "invalid_key"}`. Bare dot-segments never reach the
+   route at all: URL parsing collapses them first.
+
+### Local configuration
+
+Local development needs both markers. Either set them in
+`FarmCrossSync25-backend/.dev.vars` (gitignored — a convenience for humans,
+never committed):
+
+```
+ENABLE_R2_TEST=true
+FARM_CROSSSYNC_LOCAL_DEV=true
+```
+
+or pass them on the `wrangler dev` command line (this is what the scripts do,
+so a fresh clone works without `.dev.vars`):
+
+```bash
+npx wrangler dev --var ENABLE_R2_TEST:true --var FARM_CROSSSYNC_LOCAL_DEV:true
+```
+
+**NEVER set `ENABLE_R2_TEST` or `FARM_CROSSSYNC_LOCAL_DEV` in a deployed
+environment** — not in `wrangler.jsonc` `vars`, not via `wrangler secret`.
+Layers (2)/(3) reject all traffic even if you do, and the deploy-time guard
+makes it loud.
+
+### Deploy-time guard
+
+`npm run deploy` runs `scripts/deploy-guard.mjs` before `wrangler deploy`. The
+guard parses `wrangler.jsonc` (or `wrangler.json`; `wrangler.toml` is scanned
+for the names) and aborts the deploy if any `vars` block — top level or
+per-environment — sets `ENABLE_R2_TEST` or `FARM_CROSSSYNC_LOCAL_DEV`. It
+fails closed on an unparsable config, so a production deploy with the var set
+fails loudly rather than silently exposing the backdoor.
 
 ## R2 simulation approach
 
@@ -174,13 +298,18 @@ With the stack down, run:
 npm run r2:check
 ```
 
-The script starts the local Worker, PUTs 4096 random bytes and GETs them back
-through the `BUCKET` binding, and compares them byte-for-byte. Expected:
+The script starts the local Worker with `--var ENABLE_R2_TEST:true --var
+FARM_CROSSSYNC_LOCAL_DEV:true`, PUTs 4096 random bytes and GETs them back
+through the `BUCKET` binding (key
+`farms/roundtrip-check/players/roundtrip-check/save`, percent-encoded exactly
+like the desktop client's dev fallback), and compares them byte-for-byte.
+Expected:
 
 ```
 PASS: R2 round-trip bytes unchanged (4096 bytes)
 ```
 
-The check uses the dev-only `/r2-test/:key` routes, which are disabled unless
-`ENABLE_R2_TEST=true` is passed to `wrangler dev` (the script does this, and a
-deployed Worker never sets it, so the route returns 404 in production).
+The check uses the dev-only `/r2-test/:key` routes; see "Development-only R2
+test route" for the fail-closed gate (env markers, loopback host, key shape,
+and the deploy-time guard that keeps a deployed Worker from ever exposing
+them).

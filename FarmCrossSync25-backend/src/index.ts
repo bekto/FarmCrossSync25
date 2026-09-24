@@ -12,6 +12,9 @@ import {
 import {
   saveObjectKey,
   deleteFarmSaves,
+  isPlayerSaveObjectKey,
+  isLoopbackHost,
+  maxSaveSizeBytes,
   r2S3Config,
   presignR2Put,
   presignR2Get,
@@ -21,10 +24,12 @@ type Env = {
   DB: D1Database;
   BUCKET: R2Bucket;
   ENABLE_R2_TEST?: string;
+  FARM_CROSSSYNC_LOCAL_DEV?: string;
   R2_ACCOUNT_ID?: string;
   R2_ACCESS_KEY_ID?: string;
   R2_SECRET_ACCESS_KEY?: string;
   R2_BUCKET?: string;
+  MAX_SAVE_SIZE_BYTES?: string;
 };
 
 type UserRow = {
@@ -280,13 +285,15 @@ app.post("/farms/:farmId/join", async (c) => {
   }
 
   // Maximum 16 members per farm. A pending request is not a membership, but the
-  // spec rejects joins at capacity; accept-time (ticket 21) enforces it again.
+  // spec rejects joins at capacity. Early-out only — the authoritative guard is
+  // the conditional INSERT in the accept handler (ticket 81). Fail closed: an
+  // unreadable count must not silently allow the add.
   const row = await c.env.DB.prepare(
     "SELECT COUNT(*) AS count FROM farm_members WHERE farm_id = ?1",
   )
     .bind(farm.id)
     .first<{ count: number }>();
-  if (isAtCapacity(row?.count ?? 0)) {
+  if (row === null || isAtCapacity(row.count)) {
     return c.json({ error: "farm_full", max: MAX_FARM_MEMBERS }, 409);
   }
 
@@ -299,17 +306,27 @@ app.post("/farms/:farmId/join", async (c) => {
     status: "pending" as const,
     created_at: now(),
   };
-  await c.env.DB.prepare(
-    "INSERT INTO farm_invites (id, farm_id, user_id, status, created_at) VALUES (?, ?, ?, ?, ?)",
-  )
-    .bind(
-      invite.id,
-      invite.farm_id,
-      invite.user_id,
-      invite.status,
-      invite.created_at,
+  try {
+    await c.env.DB.prepare(
+      "INSERT INTO farm_invites (id, farm_id, user_id, status, created_at) VALUES (?, ?, ?, ?, ?)",
     )
-    .run();
+      .bind(
+        invite.id,
+        invite.farm_id,
+        invite.user_id,
+        invite.status,
+        invite.created_at,
+      )
+      .run();
+  } catch (error) {
+    // A concurrent request created the pending row between the check above and
+    // this insert; the partial unique index (0005) rejects the duplicate.
+    // Surface the existing-request result instead of a 500.
+    if (/unique/i.test(String(error))) {
+      return c.json({ error: "pending request" }, 409);
+    }
+    throw error;
+  }
 
   return c.json({ invite }, 201);
 });
@@ -381,27 +398,48 @@ app.post("/invites/:inviteId/accept", async (c) => {
   const invite = await loadPendingInvite(c);
   if (invite instanceof Response) return invite;
 
-  const count = await c.env.DB.prepare(
-    "SELECT COUNT(*) AS count FROM farm_members WHERE farm_id = ?1",
-  )
-    .bind(invite.farm_id)
-    .first<{ count: number }>();
-  if (isAtCapacity(count?.count ?? 0)) {
-    return c.json({ error: "farm_full", max: MAX_FARM_MEMBERS }, 409);
-  }
-
-  // ponytail: check-then-write, not race-proof; D1 has no interactive txn. A
-  // unique member PK blocks a duplicate insert, revisit if concurrent accepts matter.
-  await c.env.DB.batch([
+  // Authoritative capacity guard: the membership INSERT is itself conditional
+  // on capacity, on the caller not already being a member, and on the invite
+  // still being pending, so two racing accepts can never push the farm past
+  // MAX_FARM_MEMBERS — D1 has no interactive transactions, so the check lives
+  // inside the statement. The invite transition is conditional on the
+  // membership existing and the invite still being pending, so the invite can
+  // never resolve without the member being added. Every statement is
+  // self-contained, so statement-level interleaving between racing requests is
+  // safe even where batches are not serialized.
+  const results = await c.env.DB.batch([
     c.env.DB.prepare(
-      "UPDATE farm_invites SET status = 'accepted' WHERE id = ?1",
-    ).bind(invite.id),
+      "INSERT INTO farm_members (farm_id, user_id, role, joined_at) " +
+        "SELECT ?1, ?2, 'member', ?3 " +
+        "WHERE (SELECT COUNT(*) FROM farm_members WHERE farm_id = ?1) < ?4 " +
+        "AND NOT EXISTS (SELECT 1 FROM farm_members WHERE farm_id = ?1 AND user_id = ?2) " +
+        "AND EXISTS (SELECT 1 FROM farm_invites WHERE id = ?5 AND status = 'pending')",
+    ).bind(invite.farm_id, invite.user_id, now(), MAX_FARM_MEMBERS, invite.id),
     c.env.DB.prepare(
-      "INSERT INTO farm_members (farm_id, user_id, role, joined_at) VALUES (?, ?, 'member', ?)",
-    ).bind(invite.farm_id, invite.user_id, now()),
+      "UPDATE farm_invites SET status = 'accepted' " +
+        "WHERE id = ?1 AND status = 'pending' " +
+        "AND EXISTS (SELECT 1 FROM farm_members WHERE farm_id = ?2 AND user_id = ?3)",
+    ).bind(invite.id, invite.farm_id, invite.user_id),
   ]);
 
-  return c.json({ invite: { ...invite, status: "accepted" } });
+  // The invite transition is the observable success: exactly one racing accept
+  // can perform it, and it only happens with the membership in place.
+  if ((results[1]?.meta?.changes ?? 0) > 0) {
+    return c.json({ invite: { ...invite, status: "accepted" } });
+  }
+
+  // Nothing resolved. If a concurrent request resolved the invite first, the
+  // result matches a sequential repeat accept (invite_not_pending). The invite
+  // can only still be pending here when the capacity guard blocked the insert.
+  const current = await c.env.DB.prepare(
+    "SELECT status FROM farm_invites WHERE id = ?1",
+  )
+    .bind(invite.id)
+    .first<{ status: string }>();
+  if (current?.status !== "pending") {
+    return c.json({ error: "invite_not_pending" }, 409);
+  }
+  return c.json({ error: "farm_full", max: MAX_FARM_MEMBERS }, 409);
 });
 
 app.post("/invites/:inviteId/deny", async (c) => {
@@ -689,9 +727,29 @@ app.post("/saves/upload-complete", async (c) => {
     typeof body?.objectKey === "string" ? body.objectKey : objectKey;
   if (requestedKey !== objectKey) return c.json({ error: "forbidden" }, 403);
 
-  // The client PUT directly to R2; the Worker only confirms the object landed.
+  // The client PUT directly to R2; the Worker confirms the object landed and
+  // matches the report. Every rejection below returns before the upsert, so a
+  // missing, oversized, or mismatched upload never replaces the previous
+  // authoritative player_saves row.
   const object = await c.env.BUCKET.head(objectKey);
   if (!object) return c.json({ error: "object not found" }, 404);
+
+  // The stored object is authoritative for its size: reject an oversized
+  // object first, then a report that disagrees with what actually landed.
+  const maxSaveSize = maxSaveSizeBytes(c.env);
+  if (object.size > maxSaveSize) {
+    return c.json({ error: "object_too_large", max: maxSaveSize }, 413);
+  }
+  if (object.size !== fileSize) {
+    return c.json(
+      {
+        error: "size_mismatch",
+        objectSize: object.size,
+        reportedSize: fileSize,
+      },
+      409,
+    );
+  }
 
   const uploadedAt = now();
   await c.env.DB.prepare(
@@ -772,21 +830,41 @@ app.post("/saves/:playerId/download-authorize", async (c) => {
   return c.json({ authorization });
 });
 
-// Dev-only R2 round-trip check. Off unless ENABLE_R2_TEST=true is passed to
-// `wrangler dev --var`, so production deployments do not expose this route.
+// Dev-only R2 round-trip route (see README "Development-only R2 test route").
+// Fail-closed stack: reachable only when (1) the local switch ENABLE_R2_TEST is
+// explicitly "true", (2) the instance is marked as local development via
+// FARM_CROSSSYNC_LOCAL_DEV="true", (3) the request arrives over loopback, and
+// (4) the key is a player-save key of the documented shape. A deployed Worker
+// satisfies (2)/(3) never; `scripts/deploy-guard.mjs` (wired into `npm run
+// deploy`) additionally refuses to ship a wrangler config that sets the dev
+// vars at all.
 app.use("/r2-test/*", async (c, next) => {
   if (c.env.ENABLE_R2_TEST !== "true") return c.notFound();
+  const host = new URL(c.req.url).host;
+  if (c.env.FARM_CROSSSYNC_LOCAL_DEV !== "true" || !isLoopbackHost(host)) {
+    // Loud misconfiguration signal in the logs: the dev switch is on outside
+    // local development. The request is rejected regardless.
+    console.warn(
+      `r2-test: rejected request outside local development (host=${host}); ` +
+        "unset ENABLE_R2_TEST in deployed environments",
+    );
+    return c.json({ error: "r2_test_local_only" }, 403);
+  }
   await next();
 });
 
 app.put("/r2-test/:key", async (c) => {
+  const key = c.req.param("key");
+  if (!isPlayerSaveObjectKey(key)) return c.json({ error: "invalid_key" }, 400);
   const body = await c.req.arrayBuffer();
-  await c.env.BUCKET.put(c.req.param("key"), body);
+  await c.env.BUCKET.put(key, body);
   return c.json({ put: true, size: body.byteLength });
 });
 
 app.get("/r2-test/:key", async (c) => {
-  const object = await c.env.BUCKET.get(c.req.param("key"));
+  const key = c.req.param("key");
+  if (!isPlayerSaveObjectKey(key)) return c.json({ error: "invalid_key" }, 400);
+  const object = await c.env.BUCKET.get(key);
   if (!object) return c.notFound();
   return new Response(object.body);
 });

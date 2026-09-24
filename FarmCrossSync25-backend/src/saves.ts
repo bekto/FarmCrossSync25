@@ -17,6 +17,38 @@ export const farmSavesPrefix = (farmId: string): string =>
   `farms/${farmId}/players/`;
 
 /**
+ * The exact shape `saveObjectKey` produces, with `farmId` / `userId` restricted
+ * to id characters (no dots, no slashes). Used to confine the development-only
+ * `/r2-test` route to player-save keys so it cannot address arbitrary bucket
+ * keys even when enabled. Traversal (`..`) is rejected explicitly on top of the
+ * character restriction as defense in depth.
+ */
+export const PLAYER_SAVE_OBJECT_KEY_PATTERN =
+  /^farms\/[A-Za-z0-9_-]+\/players\/[A-Za-z0-9_-]+\/save$/;
+
+export const isPlayerSaveObjectKey = (key: string): boolean =>
+  !key.includes("..") && PLAYER_SAVE_OBJECT_KEY_PATTERN.test(key);
+
+/**
+ * Whether an HTTP `Host` (optionally carrying a port, including bracketed IPv6
+ * literals like `[::1]:8787`) points at loopback. The development-only R2
+ * route requires this so a deployed Worker — whose request host is always the
+ * public zone name — never serves it, even if its env vars are misconfigured.
+ */
+export const isLoopbackHost = (host: string): boolean => {
+  const bracket = host.indexOf("]");
+  const hostname = (
+    bracket >= 0 ? host.slice(0, bracket + 1) : host.split(":")[0]
+  ).toLowerCase();
+  return (
+    hostname === "localhost" ||
+    hostname === "127.0.0.1" ||
+    hostname === "::1" ||
+    hostname === "[::1]"
+  );
+};
+
+/**
  * Deletes every R2 object under a farm's player-save prefix, following list
  * pagination so a farm with many players is fully cleared. An R2 failure here
  * can leave orphaned objects behind; that is spec-acceptable (see
@@ -100,6 +132,27 @@ export type PresignedPut = {
   method: "PUT";
   headers: Record<string, string>;
   expiresAt: string;
+};
+
+/**
+ * Hard cap on a save archive's byte size, enforced by `upload-complete` against
+ * the R2 object's actual size. The spec warns above ~200 MB but lets the
+ * operation proceed (specs/farm-crosssync-25/systems/cloud-save-sync.md), so
+ * the cap sits well above it. A deployment may lower/raise it via the
+ * `MAX_SAVE_SIZE_BYTES` env var (a plain wrangler var/secret read at runtime);
+ * unset or invalid values fall back to this documented default.
+ */
+export const DEFAULT_MAX_SAVE_SIZE_BYTES = 512 * 1024 * 1024;
+
+export const maxSaveSizeBytes = (env: {
+  MAX_SAVE_SIZE_BYTES?: string;
+}): number => {
+  const raw = env.MAX_SAVE_SIZE_BYTES;
+  if (raw === undefined) return DEFAULT_MAX_SAVE_SIZE_BYTES;
+  const parsed = Number.parseInt(raw, 10);
+  return Number.isInteger(parsed) && parsed > 0
+    ? parsed
+    : DEFAULT_MAX_SAVE_SIZE_BYTES;
 };
 
 export type PresignedGet = {

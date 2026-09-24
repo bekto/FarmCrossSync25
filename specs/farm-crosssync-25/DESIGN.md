@@ -26,7 +26,7 @@ Project slug: farm-crosssync-25
   - Behaviour: OS auto-scan first (Windows Documents/My Games, Linux Steam/Proton), manual folder pick fallback; states Valid / Suspicious / Invalid / Inaccessible; SHA-256; timestamped backup before every replace; any failure leaves original untouched
   - Data: bound save path; metadata (slot, map, last_modified, size, hash); local sync state (last_synced_hash/at)
   - Interfaces: Tauri commands only (scan, validate, metadata, hash, backup, replace) — no FS logic in frontend
-  - Note: exact FS25 validation markers taken from real savegames at implementation, not assumed
+  - Note: FS25 validation markers were taken from real savegames during implementation (tickets 07 and 69), not assumed
 - **Farms & Membership**
   - Purpose: small trusted group that can see each other's saves
   - Behaviour: create (name + bound save) yields short case-insensitive code (X7K9-PQ2 style); join via code → pending request → owner accept/deny; max 16 members; multi-farm membership with one active farm (dropdown); owner can transfer ownership to any member (confirm dialog, immediate); previous owner stays as member; leave-succession remains fallback (ownership to earliest-joined remaining member); kick = leave = that player's cloud save deleted; last member leaving deletes farm + all cloud saves
@@ -34,7 +34,7 @@ Project slug: farm-crosssync-25
   - Interfaces: POST /farms, GET /farms/:id, POST /farms/:id/join, GET invites, POST invites/:id/accept|deny, GET members, DELETE members/:userId, POST /farms/:farmId/transfer-owner
 - **Cloud Save Sync**
   - Purpose: one current cloud save per player per farm
-  - Behaviour: upload = zip local save (progress) → SHA-256 → authorized direct-to-R2 put (zip+upload progress shown) → complete metadata, replaces prior object; download = confirm → backup local → fetch zip → verify SHA-256 → replace local → update sync state; conflict warning when local hash ≠ last_synced_hash (Keep Mine / Download Cloud / Cancel); poll farm data every 20s while farm screen open; warn above ~200 MB but allow
+  - Behaviour: upload = zip local save (progress) → SHA-256 → authorized direct-to-R2 put (zip+upload progress shown) → complete metadata, replaces prior object; download = confirm → backup local → fetch zip → verify SHA-256 → replace local → update sync state; conflict warning when local hash ≠ last_synced_hash (Keep My Save / Download Cloud Save / Cancel); poll farm data every 20s while farm screen open; warn above ~200 MB but allow
   - Data: player_saves(farm_id, user_id, object_key, file_size, sha256, save_name, uploaded_at); R2 key farms/{farm_id}/players/{user_id}/save (single zip)
   - Interfaces: GET /farms/:id/saves, POST /saves/upload-authorize, POST /saves/upload-complete, POST /saves/:playerId/download-authorize
 - **Desktop UI**
@@ -47,7 +47,7 @@ Project slug: farm-crosssync-25
 - Desktop: Tauri 2, Rust (src-tauri/fs25/ discovery per-OS, validator, metadata, hash, backup), Svelte + TypeScript
 - Backend: Cloudflare Workers + Hono + TypeScript; D1 metadata; R2 save zips; Wrangler local dev (local Worker/D1/R2 simulation)
 - Upload/download: client ↔ R2 direct via short-lived authorized URLs; Worker never streams save bytes
-- Two repos (local Git first, remotes later): FarmCrossSync25 (desktop, eventually public), FarmCrossSync25-backend (stays private)
+- One local-first monorepo (root `README.md` describes the layout), remotes later
 - Environments: local → Cloudflare staging → production (human checkpoint before prod infra); client holds only API_BASE_URL
 - Installers: Windows NSIS .exe, Linux AppImage
 

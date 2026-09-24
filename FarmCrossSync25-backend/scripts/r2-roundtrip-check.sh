@@ -1,11 +1,18 @@
 #!/usr/bin/env bash
 # Starts the local Worker and PUTs then GETs random bytes through the R2
 # binding, asserting the returned bytes match. No Cloudflare account needed.
+#
+# The dev-only /r2-test route is fail-closed: this script opts in explicitly
+# with --var ENABLE_R2_TEST:true (switch) and --var FARM_CROSSSYNC_LOCAL_DEV:true
+# (local-only marker); the route additionally refuses any non-loopback Host and
+# any key not shaped farms/{farmId}/players/{userId}/save (slashes are sent
+# percent-encoded, exactly like the desktop client's dev-mode fallback).
 set -euo pipefail
 
 PORT="${PORT:-8787}"
 BASE="http://127.0.0.1:${PORT}"
-KEY="roundtrip-check"
+KEY="farms/roundtrip-check/players/roundtrip-check/save"
+KEY_ENC="${KEY//\//%2F}"
 
 SRC="$(mktemp)"
 OUT="$(mktemp)"
@@ -17,7 +24,9 @@ cleanup() {
 trap cleanup EXIT
 
 cd "$(dirname "$0")/.."
-setsid npx wrangler dev --port "$PORT" --var ENABLE_R2_TEST:true >"$LOG" 2>&1 &
+setsid npx wrangler dev --port "$PORT" \
+  --var ENABLE_R2_TEST:true \
+  --var FARM_CROSSSYNC_LOCAL_DEV:true >"$LOG" 2>&1 &
 PID=$!
 
 for _ in $(seq 1 60); do
@@ -31,8 +40,8 @@ if ! curl -sf "$BASE/health" >/dev/null 2>&1; then
 fi
 
 head -c 4096 /dev/urandom >"$SRC"
-curl -sf -X PUT --data-binary @"$SRC" "$BASE/r2-test/$KEY" >/dev/null
-curl -sf "$BASE/r2-test/$KEY" -o "$OUT"
+curl -sf -X PUT --data-binary @"$SRC" "$BASE/r2-test/$KEY_ENC" >/dev/null
+curl -sf "$BASE/r2-test/$KEY_ENC" -o "$OUT"
 
 if cmp -s "$SRC" "$OUT"; then
   echo "PASS: R2 round-trip bytes unchanged ($(wc -c <"$SRC") bytes)"

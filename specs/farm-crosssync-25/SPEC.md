@@ -30,7 +30,7 @@ Desktop utility for Farming Simulator 25 multiplayer groups. Friends on the same
 - Rust owns all filesystem work under a dedicated FS25 module: per-OS discovery, validator, metadata reader, hasher, backup, safe replace. Frontend never performs privileged filesystem operations.
 - Backend: Cloudflare Worker (Hono, TypeScript) + D1 (metadata) + R2 (save archives). Worker authorizes transfers but never streams save bytes.
 - Upload/download: client ↔ R2 directly via short-lived authorized URLs issued by the Worker.
-- Two Git repositories, local-first, remotes added later: `FarmCrossSync25` (desktop, eventually public) and `FarmCrossSync25-backend` (stays private). The client embeds only `API_BASE_URL`; all secrets live in Worker secret storage or local dev files excluded from Git.
+- Repository: one local-first monorepo (see the root `README.md` for layout); remotes added later. The client embeds only `API_BASE_URL`; all secrets live in Worker secret storage or local dev files excluded from Git.
 - Environments: local (Wrangler local Worker/D1/R2 simulation) → Cloudflare staging → production (human checkpoint before production infrastructure).
 - Installers: Windows NSIS `.exe`, Linux AppImage.
 
@@ -46,10 +46,10 @@ Desktop utility for Farming Simulator 25 multiplayer groups. Friends on the same
 - Ships: everything in the five systems above — device identity, FS25 discovery/validation/backup/replace, farms with codes and join requests, ownership transfer, one cloud save per player per farm, zip-based upload/download with progress, SHA-256 verification, conflict warning, minimal settings, Windows + Linux.
 - Definition of done: two or more players can install, name themselves, discover or pick a save, validate it, create/join a farm, approve members, upload, see timestamps, download another player's save, get an automatic backup, verify, replace safely, see a conflict warning when their local save changed, and recover from failed uploads/downloads — on both OSes.
 - Cut: mods sync, save/cloud history, save merging, chat/voice, dedicated servers, matchmaking, public farm discovery, global friends, mobile app, WebSockets, analytics, ads, email/OAuth accounts, auto-update, farm-code rotation, self-hosting.
-- Placeholder: FS25 validation markers and metadata fields stay stubbed until real savegames are inspected (see FS25 Local Save).
+- Resolved during implementation: FS25 validation markers and metadata fields are taken from real savegames (see FS25 Local Save); the validator is not stubbed.
 
-## Open questions
-- FS25 validation markers and exact metadata fields are unknown; they must be taken from real savegames before the validator is implemented. Do not hardcode assumptions.
-- Binding or uploading a "Suspicious" save is allowed with a warning; only "Invalid" and "Inaccessible" block the flow. This policy was not stated in the design summary.
-- The content-hash definition (folder contents in stable path order) is assumed so one hash serves transfer verification and conflict detection; the design summary only said "SHA-256".
-- Local R2 simulation approach for Wrangler development is not yet chosen (in-process mock vs. S3-compatible local stand-in).
+## Decisions made during implementation
+- FS25 validation markers and metadata fields are taken from real savegames (tickets 07 and 09); the validator and metadata reader are implemented, not stubbed.
+- Binding or uploading a "Suspicious" save is allowed with a warning; only "Invalid" and "Inaccessible" block the flow.
+- The content-hash definition is fixed as SHA-256 over the save folder's contents in stable path order (see Integration & cross-cutting).
+- Local R2 simulation for Wrangler development is the in-process Miniflare emulation that `wrangler dev` provides (local Worker/D1/R2).
