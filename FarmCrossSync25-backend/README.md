@@ -302,10 +302,51 @@ makes it loud.
 
 `npm run deploy` runs `scripts/deploy-guard.mjs` before `wrangler deploy`. The
 guard parses `wrangler.jsonc` (or `wrangler.json`; `wrangler.toml` is scanned
-for the names) and aborts the deploy if any `vars` block — top level or
-per-environment — sets `ENABLE_R2_TEST` or `FARM_CROSSSYNC_LOCAL_DEV`. It
-fails closed on an unparsable config, so a production deploy with the var set
-fails loudly rather than silently exposing the backdoor.
+for the names) and aborts the deploy on any of these, failing closed when the
+config cannot be parsed:
+
+- **Development-only vars.** Any `vars` block — top level or per-environment —
+  setting `ENABLE_R2_TEST` or `FARM_CROSSSYNC_LOCAL_DEV` is refused. A
+  production deploy with the var set therefore fails loudly instead of
+  silently exposing the backdoor.
+- **Placeholder D1 database ids.** A `database_id` that is missing or still
+  the scaffold value (`00000000-0000-0000-0000-000000000000`) is refused; run
+  `wrangler d1 create` and put the real id in `wrangler.jsonc` first.
+- **Placeholder endpoint URLs.** Any URL-shaped var still pointing at
+  `example.com`, a template placeholder, or localhost is refused.
+- **Missing production secrets.** The four R2 S3 credentials
+  (`R2_ACCOUNT_ID`, `R2_ACCESS_KEY_ID`, `R2_SECRET_ACCESS_KEY`, `R2_BUCKET`)
+  are confirmed with `wrangler secret list`. When that cannot run (no
+  credentials, no network) the deploy is refused unless the operator sets
+  `FARM_CROSSSYNC_SECRETS_CONFIRMED=true` to attest that they exist.
+
+`src/deploy-guard.test.mjs` pins the detection logic.
+
+## Tests
+
+```bash
+npm run typecheck   # tsc --noEmit
+npm test            # node --test over the suites listed in package.json
+```
+
+`npm test` runs the pure-helper units (`farms.test.mjs`), the integration
+suite that drives the real Hono app through `app.request()` against an
+in-memory D1 loaded with the real migrations (`authz.test.mjs`), and the
+focused suites for the dev R2 gate, upload metadata integrity, capacity races,
+unique join requests, sessions, display names, and the deploy guard.
+
+The `scripts/*.sh` checks (`npm run identity:check`, `upload:check`,
+`download:check`, `r2:check`) drive a live `wrangler dev` end to end.
+
+## Environment variables
+
+| Name | Where | Purpose |
+| --- | --- | --- |
+| `R2_ACCOUNT_ID`, `R2_ACCESS_KEY_ID`, `R2_SECRET_ACCESS_KEY`, `R2_BUCKET` | Worker secrets (`wrangler secret put`) | R2 S3 credentials for presigned URLs. Without them the save routes return the documented `presigned: false` placeholder. |
+| `MAX_SAVE_SIZE_BYTES` | wrangler var/secret | Upload size cap in decimal bytes. Unset or invalid falls back to `DEFAULT_MAX_SAVE_SIZE_BYTES` (512 MiB). |
+| `ENABLE_R2_TEST` | `.dev.vars` or `wrangler dev --var` ONLY | Switch for the dev-only `/r2-test/*` route. Never set in a deployed environment. |
+| `FARM_CROSSSYNC_LOCAL_DEV` | `.dev.vars` or `wrangler dev --var` ONLY | Explicit local-dev marker required by the same route. Never set in a deployed environment. |
+| `FARM_CROSSSYNC_SECRETS_CONFIRMED` | deploy-time shell env only | Operator attestation that the Worker secrets exist, used by the deploy guard when `wrangler secret list` cannot run. |
 
 ## R2 simulation approach
 
