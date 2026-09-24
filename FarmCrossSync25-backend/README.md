@@ -40,6 +40,34 @@ curl http://localhost:8787/health   # {"status":"ok"}
 No `.dev.vars` is required. Secrets would go in `.dev.vars` (gitignored); none
 are needed for local development yet.
 
+## Identity & sessions
+
+Migration `0002_identity.sql` creates `users` and `sessions`; migration
+`0006_session_expiry.sql` gives sessions a bounded lifetime. Routes:
+
+- `POST /register` — body `{ "installationId": "...", "displayName": "..." }`. Idempotent on
+  `installation_id` (the request's `displayName` is only used at creation); returns
+  `{ "user": {...}, "token": "..." }`. A fresh session token is minted on every call.
+- `GET /me` — `{ "user": { id, installationId, displayName, createdAt, lastSeenAt } }`.
+- `PATCH /me` — body `{ "displayName": "..." }`. Stores the trimmed name (1–64 characters,
+  matching the client's Settings input cap) and returns `{ "user": {...} }`. Blank or
+  missing names are `400 {"error":"displayName is required"}`; over-long names are
+  `400 {"error":"displayName must be at most 64 characters"}` — never silently truncated,
+  so a failed update is distinguishable from a confirmed one. All name-bearing lists
+  (`/farms/:farmId/members`, `/farms/:farmId/invites`, `/farms/:farmId/saves`) join
+  `users.display_name`, so they show the new name on the next refresh.
+- `POST /logout` — revokes exactly the calling session and returns `{ "ok": true }`.
+  A revoked token can never be revived; registering again issues a new random token.
+
+**Sessions:** the raw token (32 random bytes, hex) is returned once at registration and
+stored only as a SHA-256 hash in `sessions`. A session is valid for
+`SESSION_TTL_MS` (30 days — the exported constant in `src/index.ts`) via
+`sessions.expires_at`; migration `0006_session_expiry.sql` backfills pre-existing
+rows to migration run time + 30 days so they remain valid. Expired, revoked,
+missing, and unknown tokens all get the identical `401 {"error":"unauthorized"}`
+from `requireAuth`, so clients recover through a single unauthorized path and
+cannot probe which case occurred.
+
 ## Farms & membership
 
 Migration `0003_farms.sql` creates `farms`, `farm_members`, and `farm_invites`

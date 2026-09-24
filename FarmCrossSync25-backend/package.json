@@ -9,7 +9,7 @@
     "identity:check": "bash scripts/identity-check.sh",
     "upload:check": "bash scripts/upload-check.sh",
     "download:check": "bash scripts/download-check.sh",
-    "test": "node --test src/farms.test.mjs src/authz.test.mjs src/r2test.test.mjs src/upload-integrity.test.mjs src/capacity.test.mjs src/join-requests.test.mjs",
+    "test": "node --test src/farms.test.mjs src/authz.test.mjs src/r2test.test.mjs src/upload-integrity.test.mjs src/capacity.test.mjs src/join-requests.test.mjs src/sessions.test.mjs src/display-name.test.mjs src/deploy-guard.test.mjs",
     "typecheck": "tsc --noEmit"
   },
   "dependencies": {

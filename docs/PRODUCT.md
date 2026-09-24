@@ -45,8 +45,7 @@ Included
     • Tauri 2
     • Rust backend
     • Svelte + TypeScript frontend
-    • Local Git repository
-    • Separate backend Git repository
+    • Single local-first monorepo
     • Device-generated identity
     • Player display name
     • FS25 automatic save discovery
@@ -92,17 +91,17 @@ Explicitly excluded from MVP
     • Advertising
 
 4. Project / Repository Structure
-The project will use two completely separate Git repositories.
+The project is a single local-first Git monorepo; see the root README.md for the authoritative layout.
 Local development structure:
-~/GameDev/
+FarmCrossSync25/
 │
-├── Farm CrossSync 25/
-│   └── Git repository #1
-│
-└── Farm CrossSync 25-backend/
-    └── Git repository #2
-Repository 1 — Desktop application
-Farm CrossSync 25/
+├── FarmCrossSync25-app/       Desktop application (Tauri 2 + Rust + Svelte)
+├── FarmCrossSync25-backend/   Cloudflare Worker (Hono + D1 + R2)
+├── specs/                     Active specifications
+├── docs/                      Durable documentation
+└── .scratch/                  Ticket pool and progress index
+Component 1 — Desktop application
+FarmCrossSync25-app/
 Contains:
     • Tauri application.
     • Rust local filesystem logic.
@@ -113,9 +112,9 @@ Contains:
     • API client.
     • UI.
     • Documentation.
-This repository is intended to eventually become public on GitHub.
-Repository 2 — Backend
-Farm CrossSync 25-backend/
+The desktop application is intended to eventually become public on GitHub.
+Component 2 — Backend
+FarmCrossSync25-backend/
 Contains:
     • Cloudflare Worker.
     • Hono API.
@@ -126,11 +125,10 @@ Contains:
     • Farm management.
     • Invite system.
     • Deployment configuration.
-This repository can remain private.
-It can later be published if the project becomes fully open-source/self-hostable.
+The backend does not need to be published separately; the repository can be published later if the project becomes fully open-source/self-hostable.
 
 5. Local Git Strategy
-Both repositories should use Git from the beginning.
+The monorepo uses Git from the beginning.
 Initially:
 local Git only
 No GitHub remote is required.
@@ -144,7 +142,7 @@ This allows OpenCode to:
     • Compare versions.
     • Revert changes.
     • Work independently on client/backend.
-    • Use separate repository histories.
+    • Keep client and backend changes in one history.
 
 6. Development Environment
 The project should support three environments.
@@ -678,8 +676,7 @@ Example:
 backups/
     2026-09-21_18-42-11/
     2026-09-21_19-05-33/
-The exact backup retention policy can be finalized during implementation.
-A reasonable MVP default is keeping the latest five backups.
+Backup retention is fixed at the latest five timestamped backups per save, pruned on creation.
 
 36. Conflict Detection
 The application must remember the last synchronized local state.
@@ -941,6 +938,7 @@ Especially:
 The original local save must remain recoverable.
 
 50. GUI Prototype Before Real Application
+Completed and removed: the prototype was built (tickets 13–14), used to validate the UX, and deleted from the repository once the real Tauri application shipped. This section is retained as historical context only.
 Before implementing the actual Tauri application, create a simple browser-based HTML/CSS/JavaScript prototype.
 It should use fake data.
 Prototype screens:

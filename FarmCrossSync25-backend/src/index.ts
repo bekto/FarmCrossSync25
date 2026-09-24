@@ -40,7 +40,25 @@ type UserRow = {
   last_seen_at: string;
 };
 
-type Variables = { user: UserRow };
+type Variables = { user: UserRow; tokenHash: string };
+
+/**
+ * Lifetime of a session issued by `POST /register` (ticket 83): a session is
+ * valid until its `sessions.expires_at` (= issue time + this constant, 30
+ * days). Once past, `requireAuth` rejects it with the same 401
+ * `{"error":"unauthorized"}` as a missing or revoked token, so callers cannot
+ * distinguish expiry from revocation and can route both through one recovery
+ * path. Migration `0006_session_expiry.sql` backfills pre-existing rows with
+ * the same 30-day window measured from the migration run.
+ */
+export const SESSION_TTL_MS = 30 * 24 * 60 * 60 * 1000;
+
+/**
+ * Maximum display-name length (ticket 84), shared with the desktop client's
+ * Settings input cap. `PATCH /me` rejects longer names with a 400 rather than
+ * silently truncating.
+ */
+export const MAX_DISPLAY_NAME_LENGTH = 64;
 
 const app = new Hono<{ Bindings: Env; Variables: Variables }>();
 
@@ -115,9 +133,14 @@ app.post("/register", async (c) => {
 
   const token = newToken();
   await c.env.DB.prepare(
-    "INSERT INTO sessions (token_hash, user_id, created_at) VALUES (?, ?, ?)",
+    "INSERT INTO sessions (token_hash, user_id, created_at, expires_at) VALUES (?, ?, ?, ?)",
   )
-    .bind(await hashToken(token), user.id, now())
+    .bind(
+      await hashToken(token),
+      user.id,
+      now(),
+      new Date(Date.now() + SESSION_TTL_MS).toISOString(),
+    )
     .run();
 
   return c.json({ user: toUser(user), token });
@@ -129,12 +152,22 @@ const requireAuth: MiddlewareHandler<{ Bindings: Env; Variables: Variables }> =
     const token = header.startsWith("Bearer ") ? header.slice(7) : "";
     if (!token) return c.json({ error: "unauthorized" }, 401);
 
+    const tokenHash = await hashToken(token);
     const session = await c.env.DB.prepare(
-      "SELECT user_id FROM sessions WHERE token_hash = ?",
+      "SELECT user_id, expires_at FROM sessions WHERE token_hash = ?",
     )
-      .bind(await hashToken(token))
-      .first<{ user_id: string }>();
+      .bind(tokenHash)
+      .first<{ user_id: string; expires_at: string | null }>();
     if (!session) return c.json({ error: "unauthorized" }, 401);
+
+    // Ticket 83: a session whose expiry has passed (or is missing or
+    // unparseable — fail closed) is dead. The response is byte-identical to a
+    // missing/unknown token so expiry and revocation are indistinguishable and
+    // the client recovers through the single unauthorized path.
+    const expiresAt = session.expires_at ? Date.parse(session.expires_at) : NaN;
+    if (!Number.isFinite(expiresAt) || expiresAt <= Date.now()) {
+      return c.json({ error: "unauthorized" }, 401);
+    }
 
     await c.env.DB.prepare("UPDATE users SET last_seen_at = ? WHERE id = ?")
       .bind(now(), session.user_id)
@@ -146,12 +179,56 @@ const requireAuth: MiddlewareHandler<{ Bindings: Env; Variables: Variables }> =
     if (!user) return c.json({ error: "unauthorized" }, 401);
 
     c.set("user", user);
+    c.set("tokenHash", tokenHash);
     await next();
   };
 
 app.use("/me", requireAuth);
 
 app.get("/me", (c) => c.json({ user: toUser(c.get("user")) }));
+
+// Ticket 84: rename. The trimmed value is stored verbatim; blank and
+// over-long values are rejected with distinct 400s (never silently coerced or
+// truncated) so a failed cloud update is clearly distinguishable from a
+// confirmed one. Every list that shows names (`/farms/:farmId/members`,
+// `/farms/:farmId/invites`, `/farms/:farmId/saves`) joins `users.display_name`,
+// so they all show the new name on the next refresh.
+app.patch("/me", async (c) => {
+  const body = (await c.req.json().catch(() => null)) as
+    | { displayName?: unknown }
+    | null;
+  const displayName =
+    typeof body?.displayName === "string" ? body.displayName.trim() : "";
+  if (!displayName) return c.json({ error: "displayName is required" }, 400);
+  if (displayName.length > MAX_DISPLAY_NAME_LENGTH) {
+    return c.json(
+      {
+        error: `displayName must be at most ${MAX_DISPLAY_NAME_LENGTH} characters`,
+      },
+      400,
+    );
+  }
+
+  const user = c.get("user");
+  await c.env.DB.prepare("UPDATE users SET display_name = ? WHERE id = ?")
+    .bind(displayName, user.id)
+    .run();
+
+  return c.json({ user: toUser({ ...user, display_name: displayName }) });
+});
+
+app.use("/logout", requireAuth);
+
+// Ticket 83: sign out. Revokes exactly the calling session — the row whose
+// hash `requireAuth` matched — so other devices keep working. A revoked token
+// is gone for good: registering again inserts a fresh random token instead of
+// resurrecting the old row.
+app.post("/logout", async (c) => {
+  await c.env.DB.prepare("DELETE FROM sessions WHERE token_hash = ?")
+    .bind(c.get("tokenHash"))
+    .run();
+  return c.json({ ok: true });
+});
 
 // Farms & membership route surface. All routes require an authenticated user.
 // Business logic (create/join/accept/deny/kick/transfer) lands in later tickets;
