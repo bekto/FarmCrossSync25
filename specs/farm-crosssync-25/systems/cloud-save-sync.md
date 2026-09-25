@@ -14,7 +14,7 @@ Publish one current cloud save per player per farm and let farm members fetch ea
 ## Data it manages
 - Player save metadata (one row per player per farm): farm_id, user_id, object_key, file_size, sha256, save_name, uploaded_at.
 - R2 object: a single zip archive at `farms/{farm_id}/players/{user_id}/save` (immutable IDs, never display names).
-- Local sync state per farm: bound save path, last_synced_hash, last_synced_at, and the last cloud save downloaded.
+- Local sync state per farm: the bound FS25 **slot** (source of truth; `bound_save_path` is derived from it), last_synced_hash, last_synced_at, and the last cloud save downloaded. A slot belongs to at most one farm.
 - No cloud history: a new upload replaces the previous object and metadata.
 
 ## Interfaces
