@@ -5,6 +5,8 @@ between players on a multiplayer farm. One player uploads their latest save;
 everyone else on the farm downloads it — with validation, hash verification,
 and automatic local backups before anything is replaced.
 
+![FarmCrossSync 25 farm screen: active farm, join code, save upload, and player list](docs/screenshots/farm-screen.png)
+
 - **Desktop app** (`FarmCrossSync25-app/`): Tauri 2 (Rust) + SvelteKit/Svelte 5
   + TypeScript. Discovers FS25 saves, packs and hashes them, syncs per-farm
   slots, and keeps session tokens in OS secure storage.
