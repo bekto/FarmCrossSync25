@@ -37,3 +37,11 @@ identity.json
 .DS_Store
 Thumbs.db
 *.swp
+
+# --- Agent working state and ticket pool ------------------------------------
+# Local ticket pool, progress index, design notes, and agent scratch files.
+# Working state only — never part of a published repository.
+.scratch/
+.claude/
+.opencode/
+.agents/
